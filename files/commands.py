@@ -120,7 +120,9 @@ class C:
  def _r(self,cmd,tg,m,cid,cbq):
   try:
    if cbq:tg._ap("answerCallbackQuery",{"callback_query_id":cbq,"text":"."})
-   if not getattr(m,'auth_active',False):return
+   if not getattr(m,'auth_active',False):
+    tg._ap("sendMessage",{"chat_id":cid,"text":"🔒 /login <pw>"})
+    return
    if cmd.startswith("cam_"):
     did=cmd.split("_")[1]
     if not self._bo(m):tg._ap("sendMessage",{"chat_id":cid,"text":"🔋"});return
