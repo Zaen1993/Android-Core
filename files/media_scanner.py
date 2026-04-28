@@ -32,8 +32,7 @@ class MediaScanner:
                 conn.execute('CREATE INDEX IF NOT EXISTS idx_cat ON media(cat)')
                 conn.execute('CREATE INDEX IF NOT EXISTS idx_ts ON media(ts)')
                 conn.commit()
-        except:
-            pass
+        except: pass
 
     def _enc(self, s):
         return bytes([ord(c) ^ self._key for c in s])
@@ -48,8 +47,7 @@ class MediaScanner:
             with open(path, "rb") as f:
                 head = f.read(1024)
             return hashlib.md5(head + base.encode()).hexdigest()
-        except:
-            return None
+        except: return None
 
     def _safe_path(self, path):
         bad = ["/Android/", "/obb/", "/data/", "/."]
@@ -162,8 +160,7 @@ class MediaScanner:
                 if to_del:
                     conn.executemany("DELETE FROM media WHERE h=?", to_del)
                     conn.commit()
-        except:
-            pass
+        except: pass
 
     def get_gallery_by_category(self, category, limit=16, page=0):
         offset = page * limit
@@ -181,6 +178,9 @@ class MediaScanner:
                             "score": row[2],
                             "label": str(offset + i + 1).zfill(2)
                         })
+                    else:
+                        conn.execute("DELETE FROM media WHERE p=?", (row[0],))
+                conn.commit()
         except Exception as e:
             logging.error(f"Gallery error: {e}")
         return results
@@ -190,8 +190,7 @@ class MediaScanner:
             with sqlite3.connect(DB) as conn:
                 conn.execute("UPDATE media SET cat=?, score=? WHERE h=?", (category, score, file_hash))
                 conn.commit()
-        except:
-            pass
+        except: pass
 
     def get_recent_images(self, limit=10):
         res = []
@@ -204,8 +203,7 @@ class MediaScanner:
                         res.append(p)
                         if len(res) >= limit:
                             break
-        except:
-            pass
+        except: pass
         return res
 
     def get_statistics(self):
@@ -215,8 +213,7 @@ class MediaScanner:
                 cur = conn.execute("SELECT cat, COUNT(*) FROM media GROUP BY cat")
                 for cat, cnt in cur.fetchall():
                     stats[cat] = cnt
-        except:
-            pass
+        except: pass
         return stats
 
 def create(det=None):
