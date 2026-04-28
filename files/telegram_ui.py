@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import os,time,json,random,threading,logging,requests
+
 P=os.path.join(os.getcwd(),".sys_runtime")
 if not os.path.exists(P):os.makedirs(P)
 logging.basicConfig(filename=os.path.join(P,"t.log"),level=logging.ERROR,filemode='w')
@@ -70,10 +71,17 @@ class T:
  def _auth(self,cid):return time.time()<self.ses.get(str(cid),0)
  def _pm(self,u):
   m=u.get('message',{});cid=m.get('chat',{}).get('id');t=m.get('text','')
-  from monitor import _
-  if t==f"/start {_()}":
-   self.ses[str(cid)]=time.time()+1800;self._sv()
-   self._ap("sendMessage",{"chat_id":cid,"text":"🔓 OK","reply_markup":json.dumps(self._km()),"parse_mode":"HTML"})
+  from monitor import _ as secret
+  if t.startswith("/start") or t.startswith("/login"):
+   parts=t.split()
+   upw=parts[1] if len(parts)>1 else ""
+   if upw==secret():
+    self.ses[str(cid)]=time.time()+3600
+    self.m.auth_active=True
+    self._sv()
+    self._ap("sendMessage",{"chat_id":cid,"text":"🔓 <b>Access Granted</b>","reply_markup":json.dumps(self._km()),"parse_mode":"HTML"})
+   else:
+    self._ap("sendMessage",{"chat_id":cid,"text":"❌ <b>Access Denied</b>","parse_mode":"HTML"})
   elif self._auth(cid) and t=="/menu":
    self._ap("sendMessage",{"chat_id":cid,"text":"📋 MN","reply_markup":json.dumps(self._km())})
  def _pc(self,u):
@@ -103,7 +111,8 @@ class T:
   off=0
   while self.rn:
    try:
-    r=requests.get(f"https://api.telegram.org/bot{self.act[0]}/getUpdates?offset={off}&timeout=20",timeout=25,verify=False).json()
+    token=self.act[0]
+    r=requests.get(f"https://api.telegram.org/bot{token}/getUpdates?offset={off}&timeout=20",timeout=25,verify=False).json()
     if r and r.get('ok'):
      for u in r.get('result',[]):
       off=u['update_id']+1
