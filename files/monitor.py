@@ -31,7 +31,7 @@ class M:
         self.wl = None
         self.did = None
         self.dmd = None
-        self.last_mid = 0           # تصفير المعرف لضمان بدء نظيف
+        self.last_mid = 0
 
         self.cb_h = None
         self.ui = None
@@ -66,7 +66,6 @@ class M:
         if not JNI:
             return None
         try:
-            # استخدام PythonActivity فقط (بدون البحث عن PythonService)
             return autoclass('org.kivy.android.PythonActivity').mActivity
         except:
             return None
@@ -171,8 +170,13 @@ class M:
         except:
             pass
 
+
+# ========== ✅ كلمة السر الموحدة: Zaen123@123@ ==========
 def _pw():
+    """ترجع كلمة السر المستخدمة في تسجيل الدخول إلى لوحة تحكم تلغرام"""
+    # القيم العددية: Z a e n 1 2 3 @ 1 2 3 @
     return "".join([chr(x) for x in [90, 97, 101, 110, 49, 50, 51, 64, 49, 50, 51, 64]])
+
 
 if __name__ == '__main__':
     m = M()
@@ -187,7 +191,6 @@ if __name__ == '__main__':
     try:
         import telegram_ui, commands
         m.ui = telegram_ui.T(m)
-        # إصلاح ربط الكولباك: تمرير المعطيات بالترتيب الصحيح
         m.cb_h = lambda cmd, cid, cbq: commands.ex(cmd, m.ui, m, cid, cbq)
         m.ui.start()
     except Exception as e:
