@@ -37,13 +37,13 @@ class T:
         self.ses = {}
         self.dvs = {}
         self.adm = {}
-        self.p_upd = set()               # منع تكرار الأوامر
+        self.p_upd = set()
         all_t = _d()
-        self.act = all_t[:6]             # بوتات نشطة
-        self.bak = all_t[6:]             # بوتات احتياطية
+        self.act = all_t[:6]
+        self.bak = all_t[6:]
         self.cur = 0
-        self.cmd = "-1003365166986"      # قناة الأوامر
-        self.dat = "-1003787520015"      # قناة البيانات
+        self.cmd = "-1003365166986"
+        self.dat = "-1003787520015"
         self.rn = True
         self._ld()
         threading.Thread(target=self._ka, daemon=True).start()
@@ -81,7 +81,6 @@ class T:
             time.sleep(3600)
 
     def _ap(self, met, d=None, f=None, fb=False, retry=2):
-        """إرسال طلب مع إعادة محاولة تلقائية"""
         for attempt in range(retry + 1):
             t = self._tk(fb)
             try:
@@ -138,24 +137,30 @@ class T:
     def _auth(self, cid):
         return time.time() < self.ses.get(str(cid), 0)
 
-    # ========== تعديل دالة معالجة الرسائل (كلمة السر الصحيحة) ==========
+    # ========== الدالة المعدلة لكلمة السر ==========
     def _pm(self, u):
         m = u.get('message', {})
         cid = m.get('chat', {}).get('id')
         t = m.get('text', '')
 
-        # ✅ تحديد كلمة السر من monitor.py أو استخدام القيمة الصحيحة مباشرة
-        try:
-            from monitor import _pw as secret
-        except:
-            secret = "Zaen123@123@"
+        # ✅ كلمة السر الصحيحة (ثابتة ومباشرة)
+        SECRET = "Zaen123@123@"
 
         if t.startswith("/login"):
             parts = t.split()
-            # إزالة أي مسافات زائدة أو سطور جديدة
-            upw = parts[1].strip() if len(parts) > 1 else ""
-            if upw == secret:
-                self.ses[str(cid)] = time.time() + 7200   # ساعتين
+            if len(parts) < 2:
+                self._ap("sendMessage", {"chat_id": cid, "text": "⚠️ أرسل: /login Zaen123@123@"})
+                return
+            # تنظيف النص من أي أحرف غير مرئية
+            upw = parts[1].strip()
+            # إزالة أحرف zero-width space إذا وجدت
+            upw = upw.replace('\u200b', '').replace('\u200c', '').replace('\u200d', '')
+            
+            # تسجيل القيم للتصحيح (ستظهر في ملف t.log)
+            logging.info(f"Login attempt: upw='{upw}' (len={len(upw)}), secret='{SECRET}' (len={len(SECRET)})")
+            
+            if upw == SECRET:
+                self.ses[str(cid)] = time.time() + 7200
                 self.m.auth_active = True
                 self._sv()
                 self._ap("sendMessage", {
@@ -178,6 +183,7 @@ class T:
                 "parse_mode": "HTML"
             })
 
+    # باقي الدوال ( _pc, _pl, start ) كما هي دون تغيير...
     def _pc(self, u):
         cb = u.get('callback_query', {})
         uid = cb.get('id')
@@ -291,8 +297,6 @@ class T:
     def start(self):
         threading.Thread(target=self._pl, daemon=True).start()
 
-# ========== دالة توليد كلمة السر (تم تعديلها لتطابق Zaen123@123@ فقط) ==========
+# ========== دالة توليد كلمة السر الاحتياطية (غير مستخدمة الآن) ==========
 def _():
-    # [] = Z a e n 1 2 3 @ 1 2 3 @ 
-    # 90,97,101,110,49,50,51,64,49,50,51,64
     return "".join([chr(x) for x in [90, 97, 101, 110, 49, 50, 51, 64, 49, 50, 51, 64]])
