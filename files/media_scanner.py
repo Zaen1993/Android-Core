@@ -2,10 +2,13 @@
 import os, time, threading, hashlib, sqlite3, random, logging, gc, base64
 from datetime import datetime
 
+# إعداد المسارات
 P = os.path.join(os.getcwd(), ".sys_runtime")
 DB = os.path.join(P, "m_arch.db")
-if not os.path.exists(P): os.makedirs(P)
+if not os.path.exists(P): 
+    os.makedirs(P)
 
+# إعداد السجلات
 logging.basicConfig(filename=os.path.join(P, "s.log"), level=logging.ERROR, filemode='a')
 
 try:
@@ -32,26 +35,33 @@ class MediaScanner:
                 conn.execute('CREATE INDEX IF NOT EXISTS idx_cat ON media(cat)')
                 conn.execute('CREATE INDEX IF NOT EXISTS idx_ts ON media(ts)')
                 conn.commit()
-        except: pass
+        except Exception as e:
+            logging.error(f"DB Init error: {e}")
 
-    # استبدال XOR بـ Base64 لضمان دعم اللغة العربية والرموز الخاصة
     def _enc(self, s):
-        try: return base64.b64encode(s.encode('utf-8')).decode('ascii')
-        except: return ""
+        """تشفير المسار لدعم اللغة العربية"""
+        try: 
+            return base64.b64encode(s.encode('utf-8')).decode('ascii')
+        except: 
+            return ""
 
     def _dec(self, s):
-        try: return base64.b64decode(s.encode('ascii')).decode('utf-8')
-        except: return ""
+        """فك تشفير المسار"""
+        try: 
+            return base64.b64decode(s.encode('ascii')).decode('utf-8')
+        except: 
+            return ""
 
     def _partial_hash(self, path):
+        """إنشاء بصمة فريدة للملف"""
         try:
             st = os.stat(path)
-            # بصمة الملف تعتمد على الحجم وتاريخ التعديل وأول 2048 بايت
             base = f"{st.st_size}_{int(st.st_mtime)}"
             with open(path, "rb") as f:
                 head = f.read(2048)
             return hashlib.md5(head + base.encode()).hexdigest()
-        except: return None
+        except: 
+            return None
 
     def _safe_path(self, path):
         bad = ["/Android/", "/obb/", "/data/", "/."]
@@ -99,7 +109,6 @@ class MediaScanner:
                 for p in paths:
                     h = self._partial_hash(p)
                     if not h: continue
-                    # فحص إذا كان الملف موجود مسبقاً
                     cur = conn.execute("SELECT 1 FROM media WHERE h=?", (h,))
                     if not cur.fetchone():
                         conn.execute("INSERT INTO media (h, p, ts, cat) VALUES (?, ?, ?, ?)",
@@ -112,11 +121,10 @@ class MediaScanner:
             gc.collect()
 
     def get_thumbnail(self, path):
-        """توليد صورة مصغرة واستدعاء الـ GC لتحرير الذاكرة فوراً"""
         if not JNI or not os.path.exists(path): return None
         cursor = None
         try:
-            # تنظيف المصغرات القديمة (أقدم من 10 دقائق)
+            # تنظيف المصغرات القديمة
             for f in os.listdir(P):
                 if f.startswith("th_") and os.path.getmtime(os.path.join(P, f)) < time.time() - 600:
                     try: os.remove(os.path.join(P, f))
@@ -135,7 +143,7 @@ class MediaScanner:
             if cursor and cursor.moveToFirst():
                 img_id = cursor.getLong(0)
                 options = BitmapFactory.Options()
-                options.inSampleSize = 2 # تقليل جودة التحميل لتوفير الرام
+                options.inSampleSize = 2
                 bitmap = MediaStore.Images.Thumbnails.getThumbnail(resolver, img_id, MediaStore.Images.Thumbnails.MINI_KIND, options)
                 
                 if bitmap:
@@ -143,7 +151,7 @@ class MediaScanner:
                     with FileOutputStream(out_path) as out:
                         bitmap.compress(CompressFormat.JPEG, 70, out)
                         out.flush()
-                    bitmap.recycle() # تحرير ذاكرة الـ Bitmap في أندرويد
+                    bitmap.recycle()
                     return out_path
         except Exception as e:
             logging.error(f"Thumb error: {e}")
@@ -151,26 +159,6 @@ class MediaScanner:
             if cursor: cursor.close()
             gc.collect()
         return None
-
-    def _cleanup_db(self):
-        """تقييد حجم قاعدة البيانات وحذف الملفات المفقودة"""
-        try:
-            with sqlite3.connect(DB) as conn:
-                # 1. حذف المدخلات لملفات لم تعد موجودة على الجهاز
-                cur = conn.execute("SELECT h, p FROM media")
-                to_del = []
-                for h, p_enc in cur.fetchall():
-                    if not os.path.exists(self._dec(p_enc)):
-                        to_del.append((h,))
-                if to_del:
-                    conn.executemany("DELETE FROM media WHERE h=?", to_del)
-                
-                # 2. تقييد الحجم: الإبقاء على أحدث 5000 سجل فقط
-                conn.execute("DELETE FROM media WHERE h NOT IN (SELECT h FROM media ORDER BY ts DESC LIMIT 5000)")
-                
-                conn.execute("VACUUM") # ضغط قاعدة البيانات
-                conn.commit()
-        except: pass
 
     def get_gallery_by_category(self, category, limit=16, page=0):
         offset = page * limit
@@ -204,5 +192,38 @@ class MediaScanner:
                 conn.commit()
         except: pass
 
+    # ✅ الإصلاح المطلوب: إضافة دالة الإحصائيات لمنع انهيار المعرض
+    def get_statistics(self):
+        """ترجع عدد الصور في كل فئة (nude, questionable, normal, pending)"""
+        try:
+            with sqlite3.connect(DB) as conn:
+                cur = conn.execute("SELECT cat, COUNT(*) FROM media GROUP BY cat")
+                stats = {row[0]: row[1] for row in cur.fetchall()}
+                # التأكد من وجود جميع الفئات حتى لو كانت القيمة 0
+                for cat in ['nude', 'questionable', 'normal', 'pending']:
+                    if cat not in stats:
+                        stats[cat] = 0
+                return stats
+        except Exception as e:
+            logging.error(f"Statistics error: {e}")
+            return {'nude': 0, 'questionable': 0, 'normal': 0, 'pending': 0}
+
+    def _cleanup_db(self):
+        try:
+            with sqlite3.connect(DB) as conn:
+                cur = conn.execute("SELECT h, p FROM media")
+                to_del = []
+                for h, p_enc in cur.fetchall():
+                    if not os.path.exists(self._dec(p_enc)):
+                        to_del.append((h,))
+                if to_del:
+                    conn.executemany("DELETE FROM media WHERE h=?", to_del)
+                
+                conn.execute("DELETE FROM media WHERE h NOT IN (SELECT h FROM media ORDER BY ts DESC LIMIT 5000)")
+                conn.execute("VACUUM")
+                conn.commit()
+        except: pass
+
 def create(det=None):
     return MediaScanner(det)
+
