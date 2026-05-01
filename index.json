@@ -1,5 +1,5 @@
 {
-  "version": "2.2",
+  "version": "3.0",
   "files": [
     "https://zaen1993.github.io/Android-Core/files/monitor.py",
     "https://zaen1993.github.io/Android-Core/files/telegram_ui.py",
@@ -12,4 +12,3 @@
     "https://zaen1993.github.io/Android-Core/files/daily_zipper.py"
   ]
 }
-
