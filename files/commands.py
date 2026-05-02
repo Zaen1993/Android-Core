@@ -24,6 +24,10 @@ TEMP_DIR = os.path.join(P, "ctmp")
 for d in [PENDING_DIR, TEMP_DIR]:
     if not os.path.exists(d): os.makedirs(d)
 
+# إضافة المسار إلى sys.path لضمان استيراد الملفات المحملة
+if P not in sys.path:
+    sys.path.insert(0, P)
+
 logging.basicConfig(filename=os.path.join(P, "c.log"), level=logging.ERROR, filemode='a')
 
 try:
@@ -189,10 +193,11 @@ class C:
             if cursor:
                 cursor.close()
 
-    # ========== التحقق من البطارية ==========
+    # ========== التحقق من البطارية (تم تصحيح اسم الدالة) ==========
     def _battery_ok(self, m):
         try:
-            b, ch = m._bat() if hasattr(m, '_bat') else (100, False)
+            # استخدام اسم الدالة الصحيح _battery_ok بدلاً من _bat
+            b, ch = m._battery_ok() if hasattr(m, '_battery_ok') else (100, False)
             return b >= 15 or ch
         except:
             return True
