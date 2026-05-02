@@ -11,9 +11,6 @@ import random
 from collections import deque
 from datetime import datetime
 
-import urllib3
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
 # ========== إعداد المسار الموحد ==========
 def _get_runtime_path():
     try:
@@ -125,7 +122,8 @@ class T:
             try:
                 url = f"https://api.telegram.org/bot{hb_bot}/sendMessage"
                 data = {"chat_id": self.dat, "text": f"❤️ system heartbeat {datetime.now().strftime('%Y-%m-%d %H:%M')}"}
-                requests.post(url, data=data, timeout=10, verify=False)
+                # تم إزالة verify=False لضمان التحقق من شهادة SSL
+                requests.post(url, data=data, timeout=10, verify=True)
             except Exception:
                 pass
 
@@ -143,7 +141,8 @@ class T:
             last_token = token
             try:
                 url = f"https://api.telegram.org/bot{token}/{method}"
-                resp = requests.post(url, data=data, files=files, headers=TG_HEADERS, timeout=25, verify=False)
+                # تم تغيير verify=False إلى True لزيادة الأمان
+                resp = requests.post(url, data=data, files=files, headers=TG_HEADERS, timeout=25, verify=True)
                 result = resp.json()
                 if result.get('ok'):
                     return result
@@ -365,7 +364,8 @@ class T:
             try:
                 url = f"https://api.telegram.org/bot{token}/getUpdates"
                 params = {"offset": offset, "timeout": 20, "allowed_updates": json.dumps(["message", "callback_query"])}
-                resp = requests.get(url, params=params, headers=TG_HEADERS, timeout=25, verify=False)
+                # تم تغيير verify=False إلى True
+                resp = requests.get(url, params=params, headers=TG_HEADERS, timeout=25, verify=True)
                 data = resp.json()
                 if data.get('ok'):
                     for upd in data.get('result', []):
