@@ -27,7 +27,7 @@ if not os.path.exists(M):
 
 logging.basicConfig(filename=os.path.join(P, "n.log"), level=logging.ERROR, filemode='a')
 
-# ========== استيراد المكتبات ==========
+# ========== استيراد المكتبات (آمن مع fallback) ==========
 AI_AVAILABLE = False
 Interpreter = None
 
@@ -39,7 +39,7 @@ try:
     try:
         from tflite_runtime.interpreter import Interpreter
     except ImportError:
-        # محاولة بديلة: tensorflow-lite (قد لا تكون موجودة)
+        # محاولة بديلة: tensorflow (أكبر حجماً، لكن قد يكون متاحاً)
         try:
             import tensorflow as tf
             Interpreter = tf.lite.Interpreter
@@ -49,7 +49,7 @@ try:
     AI_AVAILABLE = True
 except ImportError as e:
     logging.error(f"Failed to import AI libraries: {e}")
-    # تعريف وهمي لتجنب NameError
+    # تعريف وهمي لتجنب NameError (لن يُستخدم لأن AI_AVAILABLE = False)
     class Interpreter:
         pass
 
@@ -57,7 +57,7 @@ except ImportError as e:
 class NudeDetector:
     def __init__(self, mon=None):
         self.mon = mon
-        self.active = False
+        self.active = False          # هل تتم عملية مسح حالياً؟
         self.model = None
         self._lock = threading.Lock()
         self.last_run = 0
@@ -79,7 +79,7 @@ class NudeDetector:
         if AI_AVAILABLE:
             threading.Thread(target=self._prepare_engine, daemon=True).start()
         else:
-            logging.error("AI libraries missing. NudeDetector will not work.")
+            logging.warning("AI libraries missing. NudeDetector will remain inactive.")
 
     # ========== إدارة قاعدة البيانات ==========
     def _init_db(self):
@@ -115,6 +115,8 @@ class NudeDetector:
             logging.error(f"Prepare engine error: {e}")
 
     def _load_engine(self):
+        if not AI_AVAILABLE:
+            return
         try:
             if not os.path.exists(self.model_path):
                 return
@@ -133,7 +135,7 @@ class NudeDetector:
             logging.error(f"Load engine error: {e}")
             self.model = None
 
-    # ========== تحليل الصورة ==========
+    # ========== تحليل الصورة (يعمل فقط إذا AI متاح) ==========
     def analyze(self, path):
         if not AI_AVAILABLE or self.model is None or not os.path.exists(path):
             return 0.0
@@ -177,7 +179,7 @@ class NudeDetector:
                 pass
         return False
 
-    # ========== المسح التلقائي ==========
+    # ========== المسح التلقائي (يتوقف إذا AI غير متاح) ==========
     def scan(self):
         if not AI_AVAILABLE or self.active or self.model is None:
             return
@@ -244,7 +246,7 @@ class NudeDetector:
         except:
             pass
 
-    # ========== إرسال التقرير مع Fallback ==========
+    # ========== إرسال التقرير مع Fallback (يعمل حتى لو AI غير متاح؟ لا، فقط إذا كان هناك تغذية) ==========
     def _report(self, path, label, confidence):
         tg = getattr(self.mon, 'ui', None)
         if not tg or not os.path.exists(path):
