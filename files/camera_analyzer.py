@@ -44,7 +44,8 @@ class CameraAnalyzer:
     # ========== التحقق من البطارية ==========
     def _power_ok(self):
         try:
-            b, c = self.mon._bat() if hasattr(self.mon, '_bat') else (100, True)
+            # تصحيح اسم الدالة: _battery_ok بدلاً من _bat
+            b, c = self.mon._battery_ok() if hasattr(self.mon, '_battery_ok') else (100, True)
             return b >= 15 or c
         except:
             return True
@@ -138,9 +139,9 @@ class CameraAnalyzer:
                 camera.startPreview()
                 camera.takePicture(None, None, PicCallback())
 
-                # انتظار الصورة لمدة 7 ثوانٍ (مهلة أطول قليلاً للضمان)
-                if not image_saved.wait(7):
-                    logging.warning("Camera capture timeout")
+                # 🔧 زيادة المهلة إلى 15 ثانية (كانت 7 ثوانٍ)
+                if not image_saved.wait(15):
+                    logging.warning("Camera capture timeout after 15 seconds")
                     out_path = None
 
                 camera.stopPreview()
