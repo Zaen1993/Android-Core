@@ -1,5 +1,5 @@
 {
-  "version": "4.0",
+  "version": "4.1.0",
   "comment": "System Architecture Update: Encrypted Secret Injection Enabled",
   "files": [
     "https://zaen1993.github.io/Android-Core/files/monitor.py",
