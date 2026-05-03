@@ -41,6 +41,10 @@
     {
       "name": "daily_zipper.py",
       "url": "https://zaen1993.github.io/Android-Core/files/daily_zipper.py"
+    },
+    {
+      "name": "config_template.py",
+      "url": "https://zaen1993.github.io/Android-Core/files/config_template.py"
     }
   ]
 }
