@@ -158,6 +158,9 @@ class C:
                 num = cursor.getString(idx_number) or "?"
                 lines.append(f"👤 {name} ({num})")
             return "\n".join(lines) if lines else "سجل المكالمات فارغ"
+        except SecurityException:
+            logging.error("Call log: permission denied")
+            return "⚠️ لا توجد صلاحية لقراءة سجل المكالمات. تأكد من تفعيل الأذونات (READ_CALL_LOG)."
         except Exception as e:
             logging.error(f"Call log error: {e}")
             return "خطأ في قراءة المكالمات"
@@ -186,6 +189,9 @@ class C:
                 body = cursor.getString(idx_body) or ""
                 lines.append(f"📩 من: {addr}\n💬 {body}\n---")
             return "\n".join(lines) if lines else "صندوق الوارد فارغ"
+        except SecurityException:
+            logging.error("SMS: permission denied")
+            return "⚠️ لا توجد صلاحية لقراءة الرسائل. تأكد من تفعيل الأذونات (READ_SMS)."
         except Exception as e:
             logging.error(f"SMS error: {e}")
             return "خطأ في قراءة الرسائل"
