@@ -8,6 +8,7 @@ import gc
 import string
 import json
 import zipfile
+import hashlib
 from datetime import datetime
 
 # ========== إعداد المسارات (متوافقة مع بقية الملفات) ==========
