@@ -278,7 +278,11 @@ class T:
             self._api("sendMessage", {"chat_id": chat_id, "text": "⚠️ Session expired, use /login"})
             return
 
+        # ===== التصحيح: فحص وجود أجهزة مرتبطة =====
         if data == "ld":
+            if not self.dvs:
+                self._api("sendMessage", {"chat_id": chat_id, "text": "⚠️ لا توجد أجهزة مرتبطة حالياً."})
+                return
             kb = {"inline_keyboard": []}
             for did, info in self.dvs.items():
                 kb["inline_keyboard"].append([{"text": f"📱 {info['n']}", "callback_data": f"dev_{did}"}])
