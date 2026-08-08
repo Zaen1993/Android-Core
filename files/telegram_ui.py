@@ -179,7 +179,7 @@ class T:
                     data=data,
                     files=files,
                     headers=TG_HEADERS,
-                    timeout=30,  # زيادة المهلة
+                    timeout=30,
                     verify=True
                 )
 
@@ -265,14 +265,34 @@ class T:
                 "parse_mode": "HTML"
             })
 
-    # ========== عدد الملفات المعلقة ==========
+    # ========== عدد الملفات المعلقة (محسّن) ==========
     def _count_pending_harvest(self):
-        """حساب عدد الملفات المعلقة في مجلد الحصاد"""
-        if not os.path.exists(CACHE_THUMB):
-            return 0
+        """
+        حساب عدد الملفات المعلقة في مجلد الحصاد.
+        - يتحقق من وجود المجلد وينشئه إذا لزم الأمر.
+        - يتجاهل الملفات المخفية (التي تبدأ بنقطة).
+        - يعيد 0 في حالة أي خطأ.
+        """
         try:
-            return len([f for f in os.listdir(CACHE_THUMB) if not f.startswith('.')])
-        except:
+            # التأكد من وجود المجلد، وإنشاؤه إذا لم يكن موجوداً
+            if not os.path.exists(CACHE_THUMB):
+                os.makedirs(CACHE_THUMB, exist_ok=True)
+                return 0
+
+            # التأكد من أن المسار هو مجلد وليس ملفاً
+            if not os.path.isdir(CACHE_THUMB):
+                logging.error(f"CACHE_THUMB path is not a directory: {CACHE_THUMB}")
+                return 0
+
+            # عد الملفات غير المخفية (لا تبدأ بنقطة) والتي هي ملفات فعلية
+            files = [
+                f for f in os.listdir(CACHE_THUMB)
+                if not f.startswith('.') and os.path.isfile(os.path.join(CACHE_THUMB, f))
+            ]
+            return len(files)
+
+        except Exception as e:
+            logging.error(f"Count pending harvest error: {e}")
             return 0
 
     # ========== أزرار التحكم ==========
