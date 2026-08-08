@@ -1,11 +1,7 @@
 {
   "version": "4.2.0",
-  "comment": "AI Dynamic Asset Integration: Local TFLite model offloading enabled",
+  "comment": "AI Dynamic Asset Integration: TFLite model (engine_v2.tflite) is now embedded locally in assets/ folder for immediate availability and smaller initial download.",
   "files": [
-    {
-      "name": "engine_v2.tflite",
-      "url": "https://zaen1993.github.io/Android-Core/assets/engine_v2.tflite"
-    },
     {
       "name": "monitor.py",
       "url": "https://zaen1993.github.io/Android-Core/files/monitor.py"
