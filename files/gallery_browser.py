@@ -24,19 +24,18 @@ T = os.path.join(P, "g_tmp")     # مجلد مؤقت للمعاينات والت
 if not os.path.exists(T):
     os.makedirs(T)
 
-logging.basicConfig(filename=os.path.join(P, "g.log"), level=logging.ERROR, filemode='a')
+logging.basicConfig(
+    filename=os.path.join(P, "g.log"),
+    level=logging.ERROR,
+    filemode='a',
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 
 try:
     from PIL import Image, ImageOps
     PIL_AVAILABLE = True
 except ImportError:
     PIL_AVAILABLE = False
-
-try:
-    from kivy.clock import Clock
-    KIVY_AVAILABLE = True
-except ImportError:
-    KIVY_AVAILABLE = False
 
 
 class G:
@@ -63,6 +62,17 @@ class G:
                         pass
         except Exception as e:
             logging.error(f"Gallery cleanup error: {e}")
+
+    # ========== حذف آمن ==========
+    def _safe_remove(self, path):
+        """حذف ملف مع معالجة الأخطاء"""
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+                return True
+        except Exception as e:
+            logging.error(f"Safe remove error {path}: {e}")
+        return False
 
     # ========== التحقق من التبعيات ==========
     def _check_dependencies(self):
@@ -349,10 +359,7 @@ class G:
                     self.tg._api("sendMessage", {"chat_id": cid, "text": f"❌ فشل إنشاء ملف ZIP: {str(e)[:100]}"})
                 finally:
                     if os.path.exists(zip_path):
-                        try:
-                            os.remove(zip_path)
-                        except:
-                            pass
+                        self._safe_remove(zip_path)
                     gc.collect()
                     
         except Exception as e:
@@ -389,7 +396,7 @@ class G:
                 
             if resp and resp.get('ok'):
                 msg_id = resp['result']['message_id']
-                # جدولة الحذف
+                # جدولة الحذف باستخدام threading.Timer
                 self._schedule_delete(cid, msg_id, 30)
             else:
                 self.tg._api("sendMessage", {"chat_id": cid, "text": "❌ فشل في إرسال المعاينة."})
@@ -399,10 +406,7 @@ class G:
             self.tg._api("sendMessage", {"chat_id": cid, "text": "❌ خطأ في إرسال المعاينة."})
         finally:
             if thumb and os.path.exists(thumb):
-                try:
-                    os.remove(thumb)
-                except:
-                    pass
+                self._safe_remove(thumb)
 
     # ========== تحميل الملف مضغوطاً ==========
     def _download(self, cid, path, label):
@@ -440,10 +444,7 @@ class G:
             self.tg._api("sendMessage", {"chat_id": cid, "text": f"❌ فشل في إرسال الملف: {str(e)[:100]}"})
         finally:
             if os.path.exists(zip_path):
-                try:
-                    os.remove(zip_path)
-                except:
-                    pass
+                self._safe_remove(zip_path)
             gc.collect()
 
     # ========== حذف الملف نهائياً ==========
@@ -454,11 +455,6 @@ class G:
 
         try:
             if os.path.exists(path):
-                # نقل إلى سلة محذوفات بدلاً من الحذف النهائي (اختياري)
-                # trash_dir = os.path.join(P, "trash")
-                # os.makedirs(trash_dir, exist_ok=True)
-                # os.rename(path, os.path.join(trash_dir, os.path.basename(path)))
-                
                 os.remove(path)
                 
                 # إزالة من قاعدة البيانات إذا كان متوفراً
@@ -481,14 +477,16 @@ class G:
         finally:
             gc.collect()
 
-    # ========== جدولة حذف الرسالة ==========
+    # ========== جدولة حذف الرسالة (باستخدام threading.Timer) ==========
     def _schedule_delete(self, cid, msg_id, delay_seconds):
-        """جدولة حذف رسالة بعد فترة زمنية"""
+        """جدولة حذف رسالة بعد فترة زمنية باستخدام threading.Timer"""
         def delete_task():
             try:
                 self._delete_message(cid, msg_id)
+            except Exception as e:
+                logging.error(f"Delete task error: {e}")
             finally:
-                # إزالة المؤقت من القائمة
+                # تنظيف المؤقتات المنتهية
                 self._timers = [t for t in self._timers if t.is_alive()]
         
         timer = threading.Timer(delay_seconds, delete_task)
