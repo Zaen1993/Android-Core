@@ -21,8 +21,14 @@ def _get_runtime_path():
 
 P = _get_runtime_path()
 T = os.path.join(P, "g_tmp")     # مجلد مؤقت للمعاينات والتحميلات
-if not os.path.exists(T):
-    os.makedirs(T)
+
+# التأكد من وجود المجلدات الأساسية
+try:
+    os.makedirs(P, exist_ok=True)
+    os.makedirs(T, exist_ok=True)
+except Exception as e:
+    # في حالة فشل إنشاء المجلدات، نسجل الخطأ ولكن نستمر (ربما سيتم استخدام مسار بديل)
+    logging.error(f"Failed to create runtime directories: {e}")
 
 logging.basicConfig(
     filename=os.path.join(P, "g.log"),
@@ -45,21 +51,29 @@ class G:
         self.ipp = 16     # عدد الصور في الصفحة الواحدة
         self._timers = []  # الاحتفاظ بالمؤقتات النشطة
         self._lock = threading.Lock()  # قفل للعمليات المتزامنة
+
+        # التأكد من وجود المجلد المؤقت قبل البدء
+        try:
+            os.makedirs(T, exist_ok=True)
+        except Exception as e:
+            logging.error(f"Failed to create temp directory: {e}")
+
         self._cleanup_old_temp()
 
     # ========== تنظيف الملفات المؤقتة القديمة ==========
     def _cleanup_old_temp(self):
         """تنظيف الملفات المؤقتة الأقدم من ساعة"""
         try:
+            if not os.path.exists(T):
+                return
             now = time.time()
-            if os.path.exists(T):
-                for f in os.listdir(T):
-                    path = os.path.join(T, f)
-                    try:
-                        if os.path.isfile(path) and os.path.getmtime(path) < now - 3600:
-                            os.remove(path)
-                    except:
-                        pass
+            for f in os.listdir(T):
+                path = os.path.join(T, f)
+                try:
+                    if os.path.isfile(path) and os.path.getmtime(path) < now - 3600:
+                        os.remove(path)
+                except Exception as e:
+                    logging.error(f"Error removing old temp file {path}: {e}")
         except Exception as e:
             logging.error(f"Gallery cleanup error: {e}")
 
@@ -95,25 +109,27 @@ class G:
             ext = os.path.splitext(path)[1].lower()
             if ext not in ['.jpg', '.jpeg', '.png', '.bmp', '.webp', '.gif']:
                 return None
-                
+
             with Image.open(path) as img:
                 # التوافق مع الإصدارات المختلفة من PIL
                 try:
                     resample = Image.Resampling.LANCZOS
                 except AttributeError:
                     resample = Image.LANCZOS
-                
+
                 img = ImageOps.fit(img, size, method=resample, centering=(0.5, 0.5))
+                # التأكد من وجود المجلد المؤقت
+                os.makedirs(T, exist_ok=True)
                 out_path = os.path.join(T, f"th_{int(time.time()*1000)}_{random.randint(1000,9999)}.jpg")
                 img.save(out_path, "JPEG", quality=70, optimize=True)
-                
+
                 # التحقق من إنشاء الملف
                 if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
                     return out_path
                 return None
-                
+
         except Exception as e:
-            logging.error(f"Thumbnail error: {e}")
+            logging.error(f"Thumbnail error for {path}: {e}")
             return None
 
     # ========== دالة مساعدة: تحويل اسم الفئة ==========
@@ -233,7 +249,7 @@ class G:
 
         try:
             size_mb = round(os.path.getsize(path) / (1024 * 1024), 1)
-        except:
+        except Exception:
             size_mb = 0
 
         kb = [
@@ -322,11 +338,20 @@ class G:
                 return
 
             # التحقق من المساحة
-            total_size = sum(os.path.getsize(i['path']) for i in items if i.get('path') and os.path.exists(i['path']))
+            total_size = 0
+            for item in items:
+                path = item.get('path')
+                if path and os.path.exists(path):
+                    try:
+                        total_size += os.path.getsize(path)
+                    except Exception:
+                        pass
             if total_size > 100 * 1024 * 1024:  # 100MB
                 self.tg._api("sendMessage", {"chat_id": cid, "text": "⚠️ حجم الصفحة كبير جداً (>100MB). حاول صفحة أخرى."})
                 return
 
+            # التأكد من وجود المجلد المؤقت
+            os.makedirs(T, exist_ok=True)
             zip_path = os.path.join(T, f"bulk_{cat}_p{page}_{int(time.time())}_{random.randint(1000,9999)}.zip")
             
             with self._lock:
@@ -335,7 +360,10 @@ class G:
                         for item in items:
                             path = item.get('path')
                             if path and os.path.exists(path):
-                                zf.write(path, os.path.basename(path))
+                                try:
+                                    zf.write(path, os.path.basename(path))
+                                except Exception as e:
+                                    logging.error(f"Error adding file to zip: {e}")
 
                     # التحقق من إنشاء ZIP
                     if not os.path.exists(zip_path) or os.path.getsize(zip_path) == 0:
@@ -377,7 +405,8 @@ class G:
             return
 
         # الفيديوهات لا تدعم المعاينة
-        if path.lower().endswith(('.mp4', '.mkv', '.3gp', '.mov', '.avi', '.webm')):
+        video_exts = ('.mp4', '.mkv', '.3gp', '.mov', '.avi', '.webm')
+        if path.lower().endswith(video_exts):
             self.tg._api("sendMessage", {"chat_id": cid, "text": "📽 معاينة الفيديو غير مدعومة. يمكنك تحميله."})
             return
 
@@ -418,11 +447,16 @@ class G:
             self.tg._api("sendMessage", {"chat_id": cid, "text": "❌ الملف غير موجود."})
             return
 
-        file_size = os.path.getsize(path)
+        try:
+            file_size = os.path.getsize(path)
+        except Exception:
+            file_size = 0
         if file_size > 45 * 1024 * 1024:
             self.tg._api("sendMessage", {"chat_id": cid, "text": "⚠️ حجم الملف كبير جداً (>45MB). لا يمكن إرساله عبر البوت."})
             return
 
+        # التأكد من وجود المجلد المؤقت
+        os.makedirs(T, exist_ok=True)
         zip_path = os.path.join(T, f"dl_{int(time.time())}_{random.randint(1000,9999)}.zip")
         
         try:
@@ -461,8 +495,8 @@ class G:
                 if self.sc and hasattr(self.sc, 'remove_from_db'):
                     try:
                         self.sc.remove_from_db(path)
-                    except:
-                        pass
+                    except Exception as e:
+                        logging.error(f"Remove from DB error: {e}")
                 
                 msg = f"🗑 تم حذف #{label} نهائياً."
                 if cat is not None and page is not None:
