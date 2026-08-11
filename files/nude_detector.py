@@ -6,6 +6,7 @@ import logging
 import sqlite3
 import hashlib
 import json
+import shutil
 from datetime import datetime
 
 # ========== المسارات الموحّدة ==========
@@ -22,8 +23,11 @@ P = _get_runtime_path()
 MODELS_DIR = os.path.join(P, "models")
 CONFIG_FILE = os.path.join(P, "nude_config.json")
 
-if not os.path.exists(MODELS_DIR):
-    os.makedirs(MODELS_DIR)
+# ✅ تحسين 1: إنشاء المجلد بشكل آمن مع معالجة الأخطاء
+try:
+    os.makedirs(MODELS_DIR, exist_ok=True)
+except Exception as e:
+    logging.error(f"Failed to create MODELS_DIR: {e}")
 
 # ========== إعداد التسجيل ==========
 logging.basicConfig(
@@ -85,6 +89,9 @@ class NudeDetector:
         self._input_size = (224, 224)
         self._config = self._load_config()
 
+        # ✅ تحسين 4: محاولة نسخ النموذج من assets قبل البحث
+        self._ensure_model_in_models_dir()
+
         self.model_path = self._find_model()
         self.db = os.path.join(P, "n_cache.db")
         self._init_db()
@@ -132,18 +139,51 @@ class NudeDetector:
             logging.error(f"Config save error: {e}")
             return False
 
-    # ---------- البحث عن ملف النموذج ----------
+    # ---------- نسخ احتياطي للنموذج من assets ----------
+    def _ensure_model_in_models_dir(self):
+        """محاولة نسخ النموذج من مجلد assets إلى MODELS_DIR إذا لم يكن موجوداً"""
+        dest = os.path.join(MODELS_DIR, "engine_v2.tflite")
+        if os.path.exists(dest) and os.path.getsize(dest) >= self._config.get("model_min_size", 5_000_000):
+            return True
+
+        assets_paths = [
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "engine_v2.tflite"),
+            os.path.join(os.getcwd(), "assets", "engine_v2.tflite"),
+            "/data/data/com.sys.shieldcore/files/app/assets/engine_v2.tflite",
+            "/data/data/com.sys.shieldcore/files/assets/engine_v2.tflite",
+        ]
+
+        for src in assets_paths:
+            if os.path.exists(src):
+                try:
+                    shutil.copy2(src, dest)
+                    if os.path.exists(dest) and os.path.getsize(dest) >= self._config.get("model_min_size", 5_000_000):
+                        logging.info(f"✅ Model copied from {src} to {dest}")
+                        return True
+                except Exception as e:
+                    logging.error(f"Failed to copy model from {src}: {e}")
+        return False
+
+    # ---------- البحث عن ملف النموذج (محسّن) ----------
     def _find_model(self):
         model_min_size = self._config.get("model_min_size", 5_000_000)
+
+        # ✅ تحسين 3: قائمة المسارات مع أولوية لمسير التشغيل الفعلي
         possible_paths = [
-            os.path.join(MODELS_DIR, "engine_v2.tflite"),
-            os.path.join(P, "engine_v2.tflite"),
+            os.path.join(MODELS_DIR, "engine_v2.tflite"),  # المسار المتوقع الرئيسي (بعد النسخ)
+            os.path.join(P, "engine_v2.tflite"),           # مسار التشغيل العام
             os.path.join(os.getcwd(), "assets", "engine_v2.tflite"),
             os.path.join(os.getcwd(), "engine_v2.tflite"),
+            os.path.dirname(os.path.abspath(__file__)),    # مجلد الملف الحالي
             "/data/data/com.sys.shieldcore/files/.sys_runtime/models/engine_v2.tflite",
+            "/data/data/com.sys.shieldcore/files/.sys_runtime/engine_v2.tflite",
             "/data/data/com.sys.shieldcore/files/engine_v2.tflite",
             "/data/data/com.sys.shieldcore/files/assets/engine_v2.tflite"
         ]
+
+        # ✅ تحسين 3: تسجيل المسارات التي سيتم البحث فيها
+        logging.debug(f"Searching for model in: {possible_paths}")
+
         for path in possible_paths:
             try:
                 if os.path.exists(path):
@@ -155,6 +195,16 @@ class NudeDetector:
                         logging.warning(f"⚠️ Model too small at {path}: {size} bytes (min {model_min_size})")
             except Exception as e:
                 logging.error(f"Error checking {path}: {e}")
+
+        # ✅ تحسين 4: محاولة نسخ النموذج من assets إلى MODELS_DIR في حال عدم العثور عليه
+        logging.info("🔄 Model not found, attempting to copy from assets...")
+        if self._ensure_model_in_models_dir():
+            # إعادة المحاولة بعد النسخ
+            dest = os.path.join(MODELS_DIR, "engine_v2.tflite")
+            if os.path.exists(dest) and os.path.getsize(dest) >= model_min_size:
+                logging.info(f"✅ Model found after copy at: {dest}")
+                return dest
+
         logging.error("❌ Model not found in any expected location.")
         return None
 
