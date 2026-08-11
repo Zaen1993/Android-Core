@@ -33,7 +33,7 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
-# ========== استيراد المكتبات مع الحماية (تصحيح الخطأ 1) ==========
+# ========== استيراد المكتبات مع الحماية ==========
 AI_AVAILABLE = False
 Interpreter = None
 np = None
@@ -89,12 +89,16 @@ class NudeDetector:
         self.db = os.path.join(P, "n_cache.db")
         self._init_db()
 
-        # ✅ تصحيح الخطأ 2: تشغيل خيط إعادة التحميل التلقائي إذا توفّر النموذج
+        # تشغيل خيط إعادة التحميل التلقائي إذا توفّر النموذج
         if AI_AVAILABLE and self.model_path:
             threading.Thread(target=self._load_engine_forever, daemon=True).start()
             logging.info("🔄 AI engine loading thread started.")
         else:
-            logging.warning(f"⚠️ AI unavailable or model missing. Path: {self.model_path}, AI_AVAILABLE: {AI_AVAILABLE}")
+            if not AI_AVAILABLE:
+                logging.warning("⚠️ AI libraries not available (tflite_runtime/tensorflow missing).")
+            if not self.model_path:
+                logging.warning("⚠️ Model file (engine_v2.tflite) not found in any expected location.")
+            logging.warning("⚠️ AI engine will be disabled.")
 
     # ---------- الإعدادات ----------
     def _load_config(self):
@@ -148,13 +152,13 @@ class NudeDetector:
                         logging.info(f"✅ Model found at: {path} ({size/1024/1024:.2f} MB)")
                         return path
                     else:
-                        logging.warning(f"⚠️ Model too small at {path}: {size} bytes")
+                        logging.warning(f"⚠️ Model too small at {path}: {size} bytes (min {model_min_size})")
             except Exception as e:
                 logging.error(f"Error checking {path}: {e}")
         logging.error("❌ Model not found in any expected location.")
         return None
 
-    # ---------- قاعدة البيانات (معالجة الأخطاء - تصحيح الخطأ 3) ----------
+    # ---------- قاعدة البيانات (معالجة الأخطاء) ----------
     def _init_db(self):
         try:
             with sqlite3.connect(self.db, check_same_thread=False) as conn:
@@ -174,7 +178,7 @@ class NudeDetector:
             logging.error(f"DB init error: {e}")
 
     def _db_execute(self, query, params=(), commit=True):
-        """تنفيذ آمن لاستعلام قاعدة البيانات (معالجة الخطأ 3)"""
+        """تنفيذ آمن لاستعلام قاعدة البيانات"""
         try:
             with sqlite3.connect(self.db, check_same_thread=False) as conn:
                 conn.execute(query, params)
@@ -185,15 +189,23 @@ class NudeDetector:
             logging.error(f"DB execute error: {e}")
             return False
 
-    # ---------- تحميل المحرك تلقائيًا مع إعادة المحاولة (تصحيح الخطأ 2) ----------
+    # ---------- تحميل المحرك تلقائيًا مع إعادة المحاولة ----------
     def _load_engine_forever(self):
         """يحاول تحميل النموذج إلى ما لا نهاية حتى ينجح أو يصل للحد الأقصى للأخطاء"""
         if not AI_AVAILABLE or self._loading_engine or not self.model_path:
             return
+        
+        # ✅ الخطأ 1: التحقق من وجود ملف النموذج قبل بدء التحميل
+        if not os.path.exists(self.model_path):
+            logging.error(f"❌ Model file not found at: {self.model_path}. AI engine will not load.")
+            return
+        
         self._loading_engine = True
         attempt = 0
         wait_time = 3
         model_min_size = self._config.get("model_min_size", 5_000_000)
+
+        logging.info(f"🔄 Starting AI engine load attempts from: {self.model_path}")
 
         while self._load_error_count < self._max_load_errors:
             try:
@@ -202,7 +214,7 @@ class NudeDetector:
                     raise FileNotFoundError(f"Model disappeared: {self.model_path}")
                 file_size = os.path.getsize(self.model_path)
                 if file_size < model_min_size:
-                    raise ValueError(f"Model too small: {file_size} bytes")
+                    raise ValueError(f"Model too small: {file_size} bytes (min {model_min_size})")
 
                 # التحميل الفعلي
                 self.model = Interpreter(model_path=self.model_path, num_threads=2)
@@ -264,6 +276,8 @@ class NudeDetector:
 
         with self._model_lock:
             if self.model is None:
+                # ✅ الخطأ 2: تسجيل رسالة debug عند عدم جاهزية النموذج
+                logging.debug("⚠️ Model not ready, cannot analyze image")
                 # إذا لم يُحمّل بعد، حاول تشغيل خيط التحميل مرة أخرى
                 if not self._loading_engine and self._load_error_count < self._max_load_errors:
                     threading.Thread(target=self._load_engine_forever, daemon=True).start()
@@ -340,12 +354,16 @@ class NudeDetector:
             return
         try:
             self.active = True
+            
+            # ✅ الخطأ 3: التحقق من وجود sc
             sc = getattr(self.mon, 'media_scanner', None) if self.mon else None
             if not sc:
+                logging.debug("MediaScanner not available, skipping scan")
                 return
 
             items = sc.get_gallery_by_category("pending", limit=30)
             if not items:
+                logging.debug("No pending items to scan")
                 return
 
             nude_threshold = self._config["nude_threshold"]
@@ -384,6 +402,8 @@ class NudeDetector:
 
             if detected > 0:
                 logging.info(f"✅ Detected {detected} sensitive images")
+            else:
+                logging.debug(f"Scan completed, no sensitive images detected")
 
         except Exception as e:
             logging.error(f"Worker error: {e}")
@@ -391,7 +411,7 @@ class NudeDetector:
             self.active = False
             self._active_lock.release()
 
-    # ---------- إدارة الكاش مع معالجة الأخطاء (تصحيح الخطأ 3) ----------
+    # ---------- إدارة الكاش مع معالجة الأخطاء ----------
     def _is_cached(self, h):
         if not h:
             return False
