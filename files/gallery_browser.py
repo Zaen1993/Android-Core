@@ -27,7 +27,6 @@ try:
     os.makedirs(P, exist_ok=True)
     os.makedirs(T, exist_ok=True)
 except Exception as e:
-    # في حالة فشل إنشاء المجلدات، نسجل الخطأ ولكن نستمر (ربما سيتم استخدام مسار بديل)
     logging.error(f"Failed to create runtime directories: {e}")
 
 logging.basicConfig(
@@ -45,12 +44,20 @@ except ImportError:
 
 
 class G:
+    # ✅ الخطأ 1: قائمة الامتدادات المدعومة كمتغير صفي
+    SUPPORTED_IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.bmp', '.webp', '.gif', '.tiff', '.ico'}
+    SUPPORTED_VIDEO_EXTS = {'.mp4', '.mkv', '.3gp', '.mov', '.avi', '.webm', '.flv'}
+
     def __init__(self, sc=None, tg=None):
         self.sc = sc      # MediaScanner instance
         self.tg = tg      # TelegramUI instance
         self.ipp = 16     # عدد الصور في الصفحة الواحدة
         self._timers = []  # الاحتفاظ بالمؤقتات النشطة
         self._lock = threading.Lock()  # قفل للعمليات المتزامنة
+
+        # ✅ تحسين: قائمة الامتدادات المدعومة
+        self.supported_image_exts = self.SUPPORTED_IMAGE_EXTS
+        self.supported_video_exts = self.SUPPORTED_VIDEO_EXTS
 
         # التأكد من وجود المجلد المؤقت قبل البدء
         try:
@@ -59,6 +66,8 @@ class G:
             logging.error(f"Failed to create temp directory: {e}")
 
         self._cleanup_old_temp()
+        # ✅ الخطأ 2: تنظيف المؤقتات المعلقة عند بدء التشغيل
+        self._cleanup_timers()
 
     # ========== تنظيف الملفات المؤقتة القديمة ==========
     def _cleanup_old_temp(self):
@@ -76,6 +85,25 @@ class G:
                     logging.error(f"Error removing old temp file {path}: {e}")
         except Exception as e:
             logging.error(f"Gallery cleanup error: {e}")
+
+    # ========== تنظيف المؤقتات ==========
+    def _cleanup_timers(self):
+        """إلغاء وتنظيف جميع المؤقتات المعلقة"""
+        try:
+            for timer in self._timers:
+                if timer and timer.is_alive():
+                    try:
+                        timer.cancel()
+                    except:
+                        pass
+            self._timers.clear()
+            logging.debug("All timers cleaned up")
+        except Exception as e:
+            logging.error(f"Timer cleanup error: {e}")
+
+    def cancel_all_timers(self):
+        """واجهة خارجية لإلغاء جميع المؤقتات"""
+        self._cleanup_timers()
 
     # ========== حذف آمن ==========
     def _safe_remove(self, path):
@@ -99,17 +127,33 @@ class G:
             return False
         return True
 
+    # ========== التحقق من امتداد الملف ==========
+    def _is_image_file(self, path):
+        """التحقق من أن الملف صورة مدعومة"""
+        if not path or not isinstance(path, str):
+            return False
+        ext = os.path.splitext(path)[1].lower()
+        return ext in self.supported_image_exts
+
+    def _is_video_file(self, path):
+        """التحقق من أن الملف فيديو مدعوم"""
+        if not path or not isinstance(path, str):
+            return False
+        ext = os.path.splitext(path)[1].lower()
+        return ext in self.supported_video_exts
+
     # ========== إنشاء صورة مصغرة ==========
     def _thumbnail(self, path, size=(300, 300)):
         """إنشاء صورة مصغرة مع التحقق من الصحة"""
         if not PIL_AVAILABLE or not os.path.exists(path):
             return None
-        try:
-            # التحقق من أن الملف صورة
-            ext = os.path.splitext(path)[1].lower()
-            if ext not in ['.jpg', '.jpeg', '.png', '.bmp', '.webp', '.gif']:
-                return None
+        
+        # ✅ الخطأ 1: التحقق من الامتداد باستخدام الدوال المخصصة
+        if not self._is_image_file(path):
+            logging.debug(f"Skipping non-image file: {path}")
+            return None
 
+        try:
             with Image.open(path) as img:
                 # التوافق مع الإصدارات المختلفة من PIL
                 try:
@@ -404,9 +448,8 @@ class G:
             self.tg._api("sendMessage", {"chat_id": cid, "text": "❌ الملف غير موجود."})
             return
 
-        # الفيديوهات لا تدعم المعاينة
-        video_exts = ('.mp4', '.mkv', '.3gp', '.mov', '.avi', '.webm')
-        if path.lower().endswith(video_exts):
+        # ✅ الخطأ 1: التحقق من امتداد الفيديو باستخدام الدالة المخصصة
+        if self._is_video_file(path):
             self.tg._api("sendMessage", {"chat_id": cid, "text": "📽 معاينة الفيديو غير مدعومة. يمكنك تحميله."})
             return
 
@@ -520,7 +563,7 @@ class G:
             except Exception as e:
                 logging.error(f"Delete task error: {e}")
             finally:
-                # تنظيف المؤقتات المنتهية
+                # ✅ الخطأ 2: تنظيف المؤقتات المنتهية
                 self._timers = [t for t in self._timers if t.is_alive()]
         
         timer = threading.Timer(delay_seconds, delete_task)
@@ -538,6 +581,12 @@ class G:
             self.tg._api("deleteMessage", {"chat_id": cid, "message_id": msg_id})
         except Exception as e:
             logging.error(f"Delete message error: {e}")
+
+    # ========== تنظيف الموارد عند الإغلاق ==========
+    def cleanup(self):
+        """تنظيف الموارد وإلغاء جميع المؤقتات"""
+        self._cleanup_timers()
+        self._cleanup_old_temp()
 
 
 # ========== دالة المصنع ==========
