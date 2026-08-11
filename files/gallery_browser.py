@@ -48,6 +48,12 @@ class G:
     SUPPORTED_IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.bmp', '.webp', '.gif', '.tiff', '.ico'}
     SUPPORTED_VIDEO_EXTS = {'.mp4', '.mkv', '.3gp', '.mov', '.avi', '.webm', '.flv'}
 
+    # تحسين الذاكرة
+    __slots__ = (
+        'sc', 'tg', 'ipp', '_timers', '_lock',
+        'supported_image_exts', 'supported_video_exts'
+    )
+
     def __init__(self, sc=None, tg=None):
         self.sc = sc      # MediaScanner instance
         self.tg = tg      # TelegramUI instance
@@ -55,7 +61,7 @@ class G:
         self._timers = []  # الاحتفاظ بالمؤقتات النشطة
         self._lock = threading.Lock()  # قفل للعمليات المتزامنة
 
-        # ✅ تحسين: قائمة الامتدادات المدعومة
+        # تحسين: قائمة الامتدادات المدعومة
         self.supported_image_exts = self.SUPPORTED_IMAGE_EXTS
         self.supported_video_exts = self.SUPPORTED_VIDEO_EXTS
 
