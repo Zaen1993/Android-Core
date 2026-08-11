@@ -7,6 +7,7 @@
 - تحسين إدارة الذاكرة (GC) وتقليل استخدام الموارد.
 - دعم إضافي لملفات الفيديو (اختياري).
 - تقديم تقارير عن التقدم والإحصائيات.
+- متوافق مع Android 10+ باستخدام RELATIVE_PATH بدلاً من DATA.
 """
 
 import os
@@ -260,9 +261,12 @@ class MediaScanner:
             logging.error(f"Permission check error: {e}")
             return True
 
-    # ========== مسح سريع لآخر 48 ساعة ==========
+    # ========== مسح سريع لآخر 48 ساعة (متوافق مع Android 10+) ==========
     def _fast_scan(self, limit=100, hours=48):
-        """مسح سريع للصور والفيديوهات الجديدة (آخر 48 ساعة)."""
+        """
+        مسح سريع للصور والفيديوهات الجديدة (آخر 48 ساعة).
+        متوافق مع Android 10+ باستخدام RELATIVE_PATH.
+        """
         if not JNI:
             return []
 
@@ -278,20 +282,47 @@ class MediaScanner:
             MediaStore = autoclass('android.provider.MediaStore')
 
             time_threshold = int(time.time()) - (hours * 3600)
+            
+            # ✅ الخطأ 1: استخدام RELATIVE_PATH بدلاً من DATA للتوافق مع Android 10+
             img_uri = MediaStore.Images.Media.EXTERNAL_CONTENT_URI
-            projection = ["_data", "date_added", "mime_type"]
+            projection = ["_data", "relative_path", "display_name", "date_added", "mime_type"]
             selection = "date_added > ? AND (mime_type LIKE ? OR mime_type LIKE ?)"
-            args = [str(time_threshold), "image/%", "video/%"]  # دعم الفيديو
+            args = [str(time_threshold), "image/%", "video/%"]
             order = "date_added DESC LIMIT " + str(limit)
 
             cursor = resolver.query(img_uri, projection, selection, args, order)
             if cursor:
                 idx_data = cursor.getColumnIndex("_data")
+                idx_relative_path = cursor.getColumnIndex("relative_path")
+                idx_display_name = cursor.getColumnIndex("display_name")
+                
                 while cursor.moveToNext():
-                    p = cursor.getString(idx_data)
+                    p = None
+                    
+                    # محاولة الحصول على المسار المطلق أولاً
+                    try:
+                        p = cursor.getString(idx_data)
+                    except:
+                        pass
+                    
+                    # إذا كان المسار المطلق غير متاح، حاول بناء المسار من RELATIVE_PATH و DISPLAY_NAME
+                    if not p or not os.path.exists(p):
+                        try:
+                            relative = cursor.getString(idx_relative_path)
+                            display_name = cursor.getString(idx_display_name)
+                            if relative and display_name:
+                                # بناء المسار الكامل
+                                p = os.path.join("/storage/emulated/0", relative, display_name)
+                        except:
+                            pass
+                    
+                    # التحقق من صحة المسار
                     if p and os.path.exists(p) and self._safe_path(p) and self._is_media_file(p):
                         results.append(p)
+            
+            logging.info(f"Fast scan completed: found {len(results)} media files")
             return results
+            
         except Exception as e:
             logging.error(f"Scan error: {e}")
             return []
@@ -393,26 +424,18 @@ class MediaScanner:
                         logging.error(f"Unexpected error processing {p}: {e}")
                         continue
 
-                # محاولة تنفيذ الـ commit مع إعادة محاولة إذا لزم الأمر
-                commit_ok = False
-                for attempt in range(MAX_RETRIES):
+                # ✅ الخطأ 2: حماية عملية commit مع rollback
+                try:
+                    conn.commit()
+                    logging.info(f"Successfully committed {processed} files to database")
+                except Exception as e:
+                    logging.error(f"Commit error: {e}")
                     try:
-                        conn.commit()
-                        commit_ok = True
-                        break
-                    except sqlite3.OperationalError as e:
-                        if "locked" in str(e).lower() and attempt < MAX_RETRIES - 1:
-                            time.sleep(RETRY_DELAY * (attempt + 1))
-                            continue
-                        logging.error(f"Commit error after {attempt+1} attempts: {e}")
-                        # محاولة إعادة المحاولة من البداية (Rollback)
-                        try:
-                            conn.rollback()
-                        except:
-                            pass
-                        raise
-                if not commit_ok:
-                    raise sqlite3.OperationalError("Commit failed after retries")
+                        conn.rollback()
+                        logging.info("Transaction rolled back")
+                    except Exception as rollback_error:
+                        logging.error(f"Rollback error: {rollback_error}")
+                    raise
 
             except Exception as e:
                 logging.error(f"Batch processing error: {e}")
@@ -476,8 +499,8 @@ class MediaScanner:
             resolver = act.getContentResolver()
 
             uri = MediaStore.Images.Media.EXTERNAL_CONTENT_URI
-            sel = MediaStore.Images.Media.DATA + "=?"
-            cursor = resolver.query(uri, ["_id"], sel, [path], None)
+            sel = MediaStore.Images.Media.RELATIVE_PATH + "=?"
+            cursor = resolver.query(uri, ["_id"], sel, [os.path.dirname(path)], None)
 
             if cursor and cursor.moveToFirst():
                 idx_id = cursor.getColumnIndex("_id")
@@ -516,7 +539,7 @@ class MediaScanner:
 
     # ========== جلب المعرض حسب التصنيف (مع تغليف) ==========
     def get_gallery_by_category(self, category, limit=16, page=0):
-        """جلب قائمة الملفات حسب الفئة."""
+        """جلب قائمة الملفات حسب الفئة مع ترتيب زمني تنازلي."""
         if not isinstance(limit, int) or limit < 1:
             limit = 16
         if not isinstance(page, int) or page < 0:
@@ -526,6 +549,7 @@ class MediaScanner:
         results = []
 
         try:
+            # ✅ الخطأ 3: ترتيب النتائج بـ ORDER BY ts DESC
             query = "SELECT h, p, cat, score, fsize FROM media WHERE cat=? ORDER BY ts DESC LIMIT ? OFFSET ?"
             rows = self._db_execute(query, (category, limit, offset), fetch_all=True)
             if not rows:
