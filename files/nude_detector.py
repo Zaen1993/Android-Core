@@ -195,9 +195,10 @@ class NudeDetector:
         if not AI_AVAILABLE or self._loading_engine or not self.model_path:
             return
         
-        # ✅ التصحيح 1: التحقق من وجود ملف النموذج قبل بدء التحميل
+        # ✅ التحقق من وجود ملف النموذج قبل بدء التحميل
         if not os.path.exists(self.model_path):
-            logging.error(f"❌ Model file not found at: {self.model_path}. AI engine will not load.")
+            logging.error(f"❌ Model file not found at: {self.model_path}. AI features disabled.")
+            self._loading_engine = False
             return
         
         self._loading_engine = True
@@ -276,7 +277,6 @@ class NudeDetector:
 
         with self._model_lock:
             if self.model is None:
-                # ✅ التصحيح 2: تسجيل رسالة debug عند عدم جاهزية النموذج
                 logging.debug("⚠️ Model not ready, cannot analyze image")
                 # إذا لم يُحمّل بعد، حاول تشغيل خيط التحميل مرة أخرى
                 if not self._loading_engine and self._load_error_count < self._max_load_errors:
@@ -287,9 +287,15 @@ class NudeDetector:
         if not path or not isinstance(path, str) or not os.path.exists(path):
             return 0.0
 
+        # ✅ التحقق من حجم الملف (تجاهل الملفات الصغيرة جداً والكبيرة جداً)
         try:
             file_size = os.path.getsize(path)
-            if file_size > self._config.get("max_file_size", 8*1024*1024) or file_size < 100:
+            # تجاهل الملفات الأقل من 1 كيلوبايت (placeholder أو تالفة)
+            if file_size < 1000:
+                logging.warning(f"File too small, possibly placeholder: {path}")
+                return 0.0
+            # تجاهل الملفات الأكبر من الحد الأقصى المسموح
+            if file_size > self._config.get("max_file_size", 8*1024*1024):
                 return 0.0
         except:
             return 0.0
@@ -355,7 +361,7 @@ class NudeDetector:
         try:
             self.active = True
             
-            # ✅ التصحيح 3: التحقق من وجود sc
+            # التحقق من وجود sc
             sc = getattr(self.mon, 'media_scanner', None) if self.mon else None
             if not sc:
                 logging.debug("MediaScanner not available, skipping scan")
