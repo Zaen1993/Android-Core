@@ -107,7 +107,7 @@ class StreamManager:
             logging.error(f"Safe remove error {path}: {e}")
         return False
 
-    # ========== التحقق من الصلاحيات (محسّن مع طلب تلقائي) ==========
+    # ========== التحقق من الصلاحيات ==========
     def _check_permissions(self, request_if_missing=False):
         """
         التحقق من صلاحيات الكاميرا والميكروفون.
@@ -236,20 +236,59 @@ class StreamManager:
             logging.error(f"Camera availability check error: {e}")
             return False
 
-    # ========== كتم صوت قسري ==========
+    # ========== كتم صوت قسري (متوافق مع Android 13+) ==========
     def _mute_audio(self, mute=True):
+        """
+        كتم أو استعادة الصوت مع التوافق مع Android 13+.
+        يستخدم RINGER_MODE_VIBRATE كبديل آمن في حال عدم توفر إذن ACCESS_NOTIFICATION_POLICY.
+        """
         if not JNI:
             return
+
         try:
             AudioManager = autoclass('android.media.AudioManager')
             PythonActivity = autoclass('org.kivy.android.PythonActivity')
+            BuildVERSION = autoclass('android.os.Build$VERSION')
+            NotificationManager = autoclass('android.app.NotificationManager')
+
             activity = PythonActivity.mActivity
             am = activity.getSystemService(activity.AUDIO_SERVICE)
+            nm = activity.getSystemService(activity.NOTIFICATION_SERVICE)
+
+            sdk_int = BuildVERSION.SDK_INT
+
+            # ✅ التحقق من صلاحية سياسة الإشعارات (Android 6.0+)
+            has_do_not_disturb_policy = True
+            if sdk_int >= 23:
+                try:
+                    has_do_not_disturb_policy = nm.isNotificationPolicyAccessGranted()
+                except Exception as e:
+                    logging.warning(f"Failed to check NotificationPolicyAccessGranted: {e}")
+                    has_do_not_disturb_policy = False
 
             if mute:
-                # حفظ وضع الصامت القديم
+                # حفظ وضع الرنين القديم
                 self._old_ringer_mode = am.getRingerMode()
-                am.setRingerMode(AudioManager.RINGER_MODE_SILENT)
+
+                # ✅ اختيار الوضع المناسب:
+                # - إذا كان Android 13+ وليس لدينا إذن، نستخدم VIBRATE
+                # - إذا كان لدينا إذن، نستخدم SILENT
+                if sdk_int >= 33 and not has_do_not_disturb_policy:
+                    target_mode = AudioManager.RINGER_MODE_VIBRATE
+                elif not has_do_not_disturb_policy:
+                    target_mode = AudioManager.RINGER_MODE_VIBRATE
+                else:
+                    target_mode = AudioManager.RINGER_MODE_SILENT
+
+                try:
+                    am.setRingerMode(target_mode)
+                except Exception as e:
+                    logging.error(f"Failed to set ringer mode to {target_mode}: {e}")
+                    # ✅ محاولة احتياطية: استخدام VIBRATE
+                    try:
+                        am.setRingerMode(AudioManager.RINGER_MODE_VIBRATE)
+                    except Exception as ex:
+                        logging.error(f"Fallback to VIBRATE mode failed: {ex}")
 
                 # كتم قنوات الصوت الفردية
                 streams = [
@@ -262,23 +301,27 @@ class StreamManager:
                     try:
                         self._old_volumes[s] = am.getStreamVolume(s)
                         am.setStreamVolume(s, 0, 0)
-                    except:
-                        pass
+                    except Exception as e:
+                        logging.debug(f"Stream {s} mute failed: {e}")
+
             else:
-                # استعادة وضع الصامت القديم
+                # استعادة وضع الرنين القديم
                 if self._old_ringer_mode != -1:
                     try:
                         am.setRingerMode(self._old_ringer_mode)
-                    except:
-                        pass
+                    except Exception as e:
+                        logging.error(f"Restore ringer mode failed: {e}")
+
                 # استعادة مستويات الصوت لكل قناة
                 for s, vol in self._old_volumes.items():
                     try:
                         am.setStreamVolume(s, vol, 0)
-                    except:
-                        pass
+                    except Exception as e:
+                        logging.debug(f"Stream {s} restore failed: {e}")
+
                 self._old_volumes.clear()
                 self._old_ringer_mode = -1
+
         except Exception as e:
             logging.error(f"Mute audio error: {e}")
 
@@ -346,7 +389,7 @@ class StreamManager:
                 logging.warning("Recording already in progress")
                 return False
 
-            # ✅ الخطأ 1: التحقق من الصلاحيات مع طلب تلقائي
+            # التحقق من الصلاحيات مع طلب تلقائي
             perms_result = self._check_permissions(request_if_missing=True)
             
             if not perms_result['ok']:
@@ -435,14 +478,11 @@ class StreamManager:
                 # ملف الإخراج المؤقت
                 media_recorder.setOutputFile(temp_path)
 
-                # ✅ الخطأ 2: محاولة prepare مع try/except منفصل
                 try:
                     media_recorder.prepare()
                 except Exception as e:
                     logging.error(f"MediaRecorder prepare failed: {e}")
-                    # محاولة استخدام إعدادات أقل جودة
                     try:
-                        # محاولة تقليل الدقة
                         if res_key != "144":
                             logging.info("Retrying with lower quality (144p)")
                             w, h, bitrate = self._res_map["144"]
@@ -455,12 +495,10 @@ class StreamManager:
                         logging.error(f"MediaRecorder prepare retry failed: {e2}")
                         raise
 
-                # محاولة start مع try/except
                 try:
                     media_recorder.start()
                 except Exception as e:
                     logging.error(f"MediaRecorder start failed: {e}")
-                    # محاولة إعادة تهيئة MediaRecorder
                     try:
                         media_recorder.reset()
                         media_recorder.setAudioSource(MediaRecorder.AudioSource.MIC)
@@ -497,7 +535,6 @@ class StreamManager:
                         logging.error(f"MediaRecorder stop failed: {e}")
                         success = False
                 else:
-                    # إذا تم الإلغاء، فقط أوقف بدون حفظ
                     try:
                         media_recorder.stop()
                     except:
