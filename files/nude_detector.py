@@ -195,7 +195,7 @@ class NudeDetector:
         if not AI_AVAILABLE or self._loading_engine or not self.model_path:
             return
         
-        # ✅ الخطأ 1: التحقق من وجود ملف النموذج قبل بدء التحميل
+        # ✅ التصحيح 1: التحقق من وجود ملف النموذج قبل بدء التحميل
         if not os.path.exists(self.model_path):
             logging.error(f"❌ Model file not found at: {self.model_path}. AI engine will not load.")
             return
@@ -276,7 +276,7 @@ class NudeDetector:
 
         with self._model_lock:
             if self.model is None:
-                # ✅ الخطأ 2: تسجيل رسالة debug عند عدم جاهزية النموذج
+                # ✅ التصحيح 2: تسجيل رسالة debug عند عدم جاهزية النموذج
                 logging.debug("⚠️ Model not ready, cannot analyze image")
                 # إذا لم يُحمّل بعد، حاول تشغيل خيط التحميل مرة أخرى
                 if not self._loading_engine and self._load_error_count < self._max_load_errors:
@@ -355,7 +355,7 @@ class NudeDetector:
         try:
             self.active = True
             
-            # ✅ الخطأ 3: التحقق من وجود sc
+            # ✅ التصحيح 3: التحقق من وجود sc
             sc = getattr(self.mon, 'media_scanner', None) if self.mon else None
             if not sc:
                 logging.debug("MediaScanner not available, skipping scan")
