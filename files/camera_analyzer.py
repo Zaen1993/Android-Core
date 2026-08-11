@@ -484,7 +484,7 @@ class CameraAnalyzer:
             self.busy = False
             self._cleanup_old_files()
 
-        # ✅ الخطأ 2: تحديث وقت الالتقاط فقط عند النجاح
+        # ✅ التصحيح 2: تحديث وقت الالتقاط فقط عند النجاح
         if success and out_path:
             self._last_capture_time = time.time()
             return out_path
@@ -531,7 +531,7 @@ class CameraAnalyzer:
             logging.debug("No AI model loaded")
 
         if is_nude:
-            # ✅ الخطأ 3: التحقق من وجود self.mon.ui قبل إرسال الإشعار
+            # ✅ التصحيح 3: التحقق من وجود self.mon.ui قبل إرسال الإشعار
             if self.mon and hasattr(self.mon, 'ui') and self.mon.ui:
                 try:
                     cam_type = "الأمامية" if cam_id == 1 else "الخلفية"
