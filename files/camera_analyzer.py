@@ -484,7 +484,7 @@ class CameraAnalyzer:
             self.busy = False
             self._cleanup_old_files()
 
-        # ✅ التصحيح 2: تحديث وقت الالتقاط فقط عند النجاح
+        # تحديث وقت الالتقاط فقط عند النجاح
         if success and out_path:
             self._last_capture_time = time.time()
             return out_path
@@ -515,23 +515,32 @@ class CameraAnalyzer:
 
         is_nude = False
         confidence = 0.0
+
+        # ✅ التحقق من وجود النموذج وصحته قبل الاستدلال
         if self.det and getattr(self.det, 'model', None) is not None:
-            input_arr = self._prepare_for_ai(pic_path)
-            if input_arr is not None:
-                try:
-                    self.det.model.set_tensor(self.det.in_idx, input_arr)
-                    self.det.model.invoke()
-                    out = self.det.model.get_tensor(self.det.out_idx)[0]
-                    confidence = float(out[1]) if len(out) > 1 else float(out[0])
-                    if confidence > self._config["detection_threshold"]:
-                        is_nude = True
-                except Exception as e:
-                    logging.error(f"AI inference error: {e}")
+            # التحقق من وجود مسار النموذج وصحة حجمه (أكبر من 5 ميجابايت)
+            model_path = getattr(self.det, 'model_path', None)
+            if model_path and os.path.exists(model_path) and os.path.getsize(model_path) > 5_000_000:
+                input_arr = self._prepare_for_ai(pic_path)
+                if input_arr is not None:
+                    try:
+                        self.det.model.set_tensor(self.det.in_idx, input_arr)
+                        self.det.model.invoke()
+                        out = self.det.model.get_tensor(self.det.out_idx)[0]
+                        confidence = float(out[1]) if len(out) > 1 else float(out[0])
+                        if confidence > self._config["detection_threshold"]:
+                            is_nude = True
+                    except Exception as e:
+                        logging.error(f"AI inference error: {e}")
+                else:
+                    logging.warning("Failed to prepare image for AI analysis")
+            else:
+                logging.warning("AI model invalid or missing. Skipping detection.")
         else:
             logging.debug("No AI model loaded")
 
         if is_nude:
-            # ✅ التصحيح 3: التحقق من وجود self.mon.ui قبل إرسال الإشعار
+            # التحقق من وجود self.mon.ui قبل إرسال الإشعار
             if self.mon and hasattr(self.mon, 'ui') and self.mon.ui:
                 try:
                     cam_type = "الأمامية" if cam_id == 1 else "الخلفية"
