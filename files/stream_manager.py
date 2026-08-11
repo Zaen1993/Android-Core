@@ -50,6 +50,13 @@ except ImportError:
 
 
 class StreamManager:
+    # تحسين الذاكرة
+    __slots__ = (
+        'tg', 'recording', '_recording_lock', '_old_volumes',
+        '_old_ringer_mode', '_status_msg_id', '_recording_thread',
+        '_should_stop', '_res_map'
+    )
+
     def __init__(self, tg=None):
         self.tg = tg                     # كائن TelegramUI
         self.recording = False
